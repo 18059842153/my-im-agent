@@ -97,6 +97,7 @@ src/my_im_agent/
 │   └── adapter.py      # FastAPI 回调服务 + 队列 + worker
 └── cli.py              # 装配入口
 tests/                  # 50 个测试：加解密 / 调度 / 意图副作用 / 回调接口
+docs/SPEC.md            # 技术规格：所有权账本 / 节点账本 / 数据契约 / 已知限制
 ```
 
 ## 开发
