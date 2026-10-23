@@ -1,0 +1,14 @@
+# 统一换行符，避免 Windows / Linux 开发者之间出现整文件 diff
+* text=auto eol=lf
+
+# 明确标记为文本的常见文件
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows 脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
