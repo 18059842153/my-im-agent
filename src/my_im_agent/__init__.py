@@ -1,4 +1,4 @@
-"""my-im-agent: a Python-based IM (instant messaging) AI agent."""
+"""my-im-agent: 接企业微信的 Python IM AI Agent（含定时闹钟能力）。"""
 
 from __future__ import annotations
 
@@ -7,13 +7,17 @@ from my_im_agent.adapters.base import (
     InboundMessage,
     OutboundMessage,
 )
-from my_im_agent.agent import Agent
+from my_im_agent.alarms import Alarm, AlarmScheduler, AlarmStore
 from my_im_agent.config import Settings
+from my_im_agent.core import Brain
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
-    "Agent",
+    "Alarm",
+    "AlarmScheduler",
+    "AlarmStore",
+    "Brain",
     "IMAdapter",
     "InboundMessage",
     "OutboundMessage",

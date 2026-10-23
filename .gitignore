@@ -29,6 +29,9 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
+# Runtime data (alarms 持久化等)
+data/
+
 # Editors / OS
 .vscode/
 .idea/
