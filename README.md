@@ -54,6 +54,14 @@ my-im-agent --adapter wecom      # 默认监听 0.0.0.0:8666
 ```
 
 > 本机调试没有公网地址时，用内网穿透（cpolar / natapp / 花生壳）把 8666 端口映射出去。
+> **每一步怎么点、怎么验，见 [docs/SETUP_WECOM.md](docs/SETUP_WECOM.md)。**
+
+配好后每一步都能立刻验证：
+
+```bash
+my-im-agent --check                      # 体检：配置 + 加解密 + 接口连通性
+my-im-agent --check --send-to <UserID>   # 给指定成员发一条测试消息
+```
 
 ## 环境变量
 
