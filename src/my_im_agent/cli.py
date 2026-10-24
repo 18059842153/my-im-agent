@@ -114,22 +114,30 @@ async def _check(settings: Settings, send_to: str | None, probe_llm: bool) -> bo
     print(f"     回调地址应为：http(s)://<你的公网域名>{settings.wecom_callback_path}")
     print(f"     本地监听：{settings.wecom_callback_host}:{settings.wecom_callback_port}")
 
-    if not settings.wecom_enabled:
-        print("\n企业微信配置不完整，跳过连通性检查。参考 docs/SETUP_WECOM.md 补齐。")
+    # 接口凭据（CorpID / AgentId / Secret）与回调配置（Token / AESKey）分开检查：
+    # 配到哪一步就能验到哪一步，不用等全配齐。
+    api_ready = bool(settings.wecom_corp_id and settings.wecom_agent_id and settings.wecom_secret)
+    callback_ready = bool(settings.wecom_token and settings.wecom_encoding_aes_key)
+
+    if not api_ready:
+        print("\nCorpID / AgentId / Secret 不完整，跳过连通性检查。参考 docs/SETUP_WECOM.md 第 1、2 步。")
         return False
 
-    print("\n=== 加解密自检 ===")
-    try:
-        crypto = WeComCrypto(
-            settings.wecom_token,
-            settings.wecom_encoding_aes_key,
-            settings.wecom_corp_id,
-        )
-        echo = "verify-123456"
-        got = crypto.decrypt(crypto.encrypt(echo))
-        report("EncodingAESKey 可用（加解密往返）", got == echo)
-    except Exception as exc:  # noqa: BLE001 - 体检要把原因打出来
-        report("EncodingAESKey 可用（加解密往返）", False, str(exc))
+    if callback_ready:
+        print("\n=== 加解密自检 ===")
+        try:
+            crypto = WeComCrypto(
+                settings.wecom_token,
+                settings.wecom_encoding_aes_key,
+                settings.wecom_corp_id,
+            )
+            echo = "verify-123456"
+            got = crypto.decrypt(crypto.encrypt(echo))
+            report("EncodingAESKey 可用（加解密往返）", got == echo)
+        except Exception as exc:  # noqa: BLE001 - 体检要把原因打出来
+            report("EncodingAESKey 可用（加解密往返）", False, str(exc))
+    else:
+        print("\n[·] Token / EncodingAESKey 还没填，跳过加解密自检（手册第 6 步）")
 
     print("\n=== 企业微信接口连通性 ===")
     api = WeComAPI(settings.wecom_corp_id, settings.wecom_secret, settings.wecom_agent_id)
