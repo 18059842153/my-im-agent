@@ -1,0 +1,36 @@
+[Unit]
+Description=my-im-agent (WeCom IM AI Agent with alarms)
+Documentation=https://github.com/18059842153/my-im-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=my-im-agent
+Group=my-im-agent
+WorkingDirectory=/opt/my-im-agent
+
+# 运行期配置：.env 放在 /opt/my-im-agent/.env（配置层会向上查找）
+# 数据目录单独放 /var/lib，升级代码时不会被覆盖
+Environment=PYTHONUNBUFFERED=1
+Environment=IM_AGENT_DATA_DIR=/var/lib/my-im-agent
+Environment=PYTHONIOENCODING=utf-8
+
+ExecStart=/opt/my-im-agent/.venv/bin/python -m my_im_agent --adapter wecom
+
+# 崩溃/异常退出自动拉起
+Restart=always
+RestartSec=5
+
+# 安全加固（不需要特权，数据目录仍可写）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/my-im-agent
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=my-im-agent
+
+[Install]
+WantedBy=multi-user.target
