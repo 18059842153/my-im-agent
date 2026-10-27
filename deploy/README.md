@@ -98,3 +98,7 @@ cd /opt/my-im-agent && git pull && sudo systemctl restart my-im-agent   # 升级
 
 闹钟存在 `/var/lib/my-im-agent/alarms.json`，单文件。
 升级代码不会覆盖它（目录独立），但换机器时记得拷走。
+
+> ⚠️ **要手工改这个文件，必须先 `systemctl stop my-im-agent`。**
+> 服务进程会把闹钟列表缓存在内存里，改完不停服务的话，
+> 下一次新增闹钟会用内存里那份把文件覆盖回去（表现为你的修改"不生效"）。
