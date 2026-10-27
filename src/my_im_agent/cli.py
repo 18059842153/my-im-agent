@@ -42,6 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--send-to", help="配合 --check：给该成员 UserID 发一条测试消息")
     parser.add_argument("--probe-llm", action="store_true", help="配合 --check：真实调用一次模型")
+    parser.add_argument(
+        "--news-now",
+        action="store_true",
+        help="立即抓取并推送一次新闻日报（忽略今日已发状态）",
+    )
+    parser.add_argument(
+        "--news-dry-run",
+        action="store_true",
+        help="配合 --news-now：只在终端打印，不发送、不写状态",
+    )
     return parser
 
 
@@ -59,6 +69,32 @@ def build_adapter(name: str, settings: Settings) -> IMAdapter:
 
         return WeComBotAdapter(settings)
     return ConsoleAdapter()
+
+
+# --- 新闻推送装配 ---
+
+
+def build_summarizer(settings: Settings):
+    from my_im_agent.news import AgentlyNewsSummarizer, EchoNewsSummarizer
+
+    if settings.llm_enabled:
+        return AgentlyNewsSummarizer(settings, chunk_size=settings.news_summary_chunk)
+    return EchoNewsSummarizer()
+
+
+def build_news_scheduler(settings: Settings, notify) -> tuple:
+    from my_im_agent.news import NewsDigestService, NewsFetcher, NewsScheduler, NewsStateStore
+
+    state = NewsStateStore(Path(settings.data_dir) / "news_state.json")
+    fetcher = NewsFetcher(timeout=settings.news_fetch_timeout)
+    service = NewsDigestService(
+        settings=settings,
+        state=state,
+        fetcher=fetcher,
+        summarizer=build_summarizer(settings),
+        notify=notify,
+    )
+    return NewsScheduler(service, settings), fetcher
 
 
 # --- 体检 ---
@@ -101,6 +137,9 @@ async def _check(settings: Settings, send_to: str | None, probe_llm: bool) -> bo
         bool(settings.data_dir),
         settings.data_dir + ("（未配置 Key 时走 Echo，不会联网）" if not settings.llm_enabled else ""),
     )
+
+    print("\n=== 新闻推送 ===")
+    await _check_news(settings, report)
 
     print("\n=== 企业微信配置 ===")
     report("WECOM_CORP_ID", bool(settings.wecom_corp_id), settings.wecom_corp_id or "(空)")
@@ -196,6 +235,105 @@ async def _check(settings: Settings, send_to: str | None, probe_llm: bool) -> bo
     return ok_overall
 
 
+async def _check_news(settings: Settings, report) -> None:
+    """新闻推送体检：开关、时区、目标、源可达性、今日状态。"""
+    from datetime import datetime, timedelta
+
+    from my_im_agent.news import SECTIONS, NewsFetcher, NewsStateStore, parse_at
+
+    at = parse_at(settings.news_at)
+    offset = datetime.now().astimezone().utcoffset()
+    report(
+        "开关",
+        settings.news_enabled,
+        "已开启" if settings.news_enabled else "已关闭（IM_AGENT_NEWS_ENABLED=0）",
+    )
+    report("服务器时区", offset == timedelta(hours=8), f"UTC{offset}")
+    report("推送时间", True, f"每天 {at:%H:%M}，补发窗口 {settings.news_catchup_minutes} 分钟")
+    report("接收者", bool(settings.news_target_user), settings.news_target_user or "(空)")
+
+    if not settings.news_enabled:
+        return
+
+    fetcher = NewsFetcher(timeout=settings.news_fetch_timeout)
+    try:
+        for section in SECTIONS:
+            result = await fetcher.fetch(section)
+            detail = f"{len(result.items)} 条"
+            if result.errors:
+                detail += "；" + " | ".join(result.errors)
+            report(f"{section.label}源（{len(section.feeds)} 个）", bool(result.items), detail)
+    finally:
+        await fetcher.aclose()
+
+    state = NewsStateStore(Path(settings.data_dir) / "news_state.json").load()
+    today = datetime.now().date().isoformat()
+    if state.last_date == today:
+        report("今日是否已发", True, f"status={state.last_status} at={state.last_at}")
+    else:
+        report("今日是否已发", True, f"尚未发送（等 {at:%H:%M}）")
+
+
+async def _news_now(settings: Settings, adapter_name: str, *, dry_run: bool) -> int:
+    """立即抓取并推送一次，不等到点。"""
+    from datetime import datetime
+
+    from my_im_agent.news import NewsDigestService, NewsFetcher, NewsStateStore
+
+    fetcher = NewsFetcher(timeout=settings.news_fetch_timeout)
+    state = NewsStateStore(Path(settings.data_dir) / "news_state.json")
+    adapter = None
+    task: asyncio.Task | None = None
+
+    if dry_run or adapter_name == "console":
+        async def notify(user_id: str, conversation_id: str, text: str) -> None:
+            print(text)
+            print("-" * 60)
+    else:
+        adapter = build_adapter(adapter_name, settings)
+
+        async def notify(user_id: str, conversation_id: str, text: str) -> None:
+            await adapter.send(
+                OutboundMessage(
+                    content=text,
+                    conversation_id=conversation_id,
+                    raw={"user_id": user_id, "markdown": True},
+                )
+            )
+
+        if hasattr(adapter, "ready"):
+            task = asyncio.create_task(adapter.start(lambda *a, **k: None))
+            try:
+                await asyncio.wait_for(adapter.ready.wait(), timeout=30)
+            except TimeoutError:
+                print("等待长连接就绪超时，请检查 BotID/Secret", file=sys.stderr)
+                if adapter is not None:
+                    await adapter.close()
+                await fetcher.aclose()
+                return 2
+
+    service = NewsDigestService(
+        settings=settings,
+        state=state,
+        fetcher=fetcher,
+        summarizer=build_summarizer(settings),
+        notify=notify,
+    )
+    try:
+        result = await service.deliver(datetime.now(), force=True, persist=not dry_run)
+    finally:
+        await fetcher.aclose()
+        if task is not None:
+            task.cancel()
+        if adapter is not None:
+            await adapter.close()
+
+    if result.errors:
+        print("问题：" + "；".join(result.errors), file=sys.stderr)
+    print(f"结果：status={result.status} 消息数={len(result.messages)}")
+    return 0 if result.ok else 1
+
+
 async def _run(adapter_name: str, settings: Settings) -> int:
     engine = build_engine(settings)
     store = AlarmStore(Path(settings.data_dir) / "alarms.json")
@@ -203,7 +341,7 @@ async def _run(adapter_name: str, settings: Settings) -> int:
     adapter = build_adapter(adapter_name, settings)
 
     async def notify(user_id: str, conversation_id: str, text: str) -> None:
-        """闹钟到点时的主动推送通道。"""
+        """闹钟到点时的主动推送通道（纯文本）。"""
         await adapter.send(
             OutboundMessage(
                 content=text,
@@ -212,14 +350,37 @@ async def _run(adapter_name: str, settings: Settings) -> int:
             )
         )
 
+    async def notify_md(user_id: str, conversation_id: str, text: str) -> None:
+        """新闻推送通道（markdown，支持加粗与链接）。"""
+        await adapter.send(
+            OutboundMessage(
+                content=text,
+                conversation_id=conversation_id,
+                raw={"user_id": user_id, "markdown": True},
+            )
+        )
+
     scheduler = AlarmScheduler(store, notify)
 
+    news_scheduler = None
+    news_fetcher = None
+    if settings.news_enabled:
+        news_scheduler, news_fetcher = build_news_scheduler(settings, notify_md)
+
+    coros = [scheduler.start(), adapter.start(brain.handle)]
+    if news_scheduler is not None:
+        coros.insert(0, news_scheduler.start())
+
     try:
-        await asyncio.gather(scheduler.start(), adapter.start(brain.handle))
+        await asyncio.gather(*coros)
     except (KeyboardInterrupt, EOFError):
         print("\nInterrupted.", file=sys.stderr)
     finally:
         scheduler.stop()
+        if news_scheduler is not None:
+            news_scheduler.stop()
+        if news_fetcher is not None:
+            await news_fetcher.aclose()
         await adapter.close()
     return 0
 
@@ -242,6 +403,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.check:
         return 0 if asyncio.run(_check(settings, args.send_to, args.probe_llm)) else 1
+
+    if args.news_now:
+        return asyncio.run(_news_now(settings, args.adapter, dry_run=args.news_dry_run))
 
     if args.adapter == "wecom":
         try:

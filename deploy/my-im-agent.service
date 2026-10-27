@@ -15,8 +15,12 @@ WorkingDirectory=/opt/my-im-agent
 Environment=PYTHONUNBUFFERED=1
 Environment=IM_AGENT_DATA_DIR=/var/lib/my-im-agent
 Environment=PYTHONIOENCODING=utf-8
+# 定时任务（每天 09:30 新闻）依赖本地时区，云主机默认多为 UTC
+Environment=TZ=Asia/Shanghai
+# 适配器：wecom=自建应用回调 / wecom-bot=智能机器人长连接（流式）
+Environment=IM_AGENT_ADAPTER=wecom
 
-ExecStart=/opt/my-im-agent/.venv/bin/python -m my_im_agent --adapter wecom
+ExecStart=/opt/my-im-agent/.venv/bin/python -m my_im_agent --adapter ${IM_AGENT_ADAPTER}
 
 # 崩溃/异常退出自动拉起
 Restart=always

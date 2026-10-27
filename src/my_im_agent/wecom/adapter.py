@@ -168,7 +168,10 @@ class WeComAdapter(IMAdapter):
 
     async def send(self, message: OutboundMessage) -> None:
         user_id = message.raw.get("user_id") or message.conversation_id
-        await self.api.send_text(user_id, message.content)
+        if message.raw.get("markdown"):
+            await self.api.send_markdown(user_id, message.content)
+        else:
+            await self.api.send_text(user_id, message.content)
 
     async def close(self) -> None:
         await self.api.aclose()

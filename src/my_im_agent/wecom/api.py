@@ -53,17 +53,25 @@ class WeComAPI:
 
     async def send_text(self, user_id: str, content: str, *, _retried: bool = False) -> None:
         """给指定成员发文本消息。"""
+        await self._send_message(
+            {"touser": user_id, "msgtype": "text", "text": {"content": content}},
+            _retried=_retried,
+        )
+
+    async def send_markdown(self, user_id: str, content: str, *, _retried: bool = False) -> None:
+        """给指定成员发 markdown 消息（支持加粗与链接，单条约 4096 字节）。"""
+        await self._send_message(
+            {"touser": user_id, "msgtype": "markdown", "markdown": {"content": content}},
+            _retried=_retried,
+        )
+
+    async def _send_message(self, payload: dict, *, _retried: bool = False) -> None:
         token = await self.access_token()
+        body = {"agentid": self._agent_id, "safe": 0, **payload}
         resp = await self._client.post(
             "/cgi-bin/message/send",
             params={"access_token": token},
-            json={
-                "touser": user_id,
-                "msgtype": "text",
-                "agentid": self._agent_id,
-                "text": {"content": content},
-                "safe": 0,
-            },
+            json=body,
         )
         data = resp.json()
         errcode = data.get("errcode", 0)
@@ -71,7 +79,7 @@ class WeComAPI:
             return
         if errcode in _TOKEN_EXPIRED_CODES and not _retried:
             await self.access_token(force_refresh=True)
-            return await self.send_text(user_id, content, _retried=True)
+            return await self._send_message(payload, _retried=True)
         raise WeComAPIError(errcode, data.get("errmsg", "unknown"))
 
     async def aclose(self) -> None:

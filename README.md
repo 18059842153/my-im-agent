@@ -27,6 +27,9 @@ AlarmScheduler ──(到点)──> 主动发消息 API <─── 回复文本
   - 「明天早上9点提醒我开会」「10分钟后提醒我喝水」「每个工作日下午6点提醒我填日报」
   - 「查看闹钟」「取消闹钟 1」
 - 闹钟持久化到 `data/alarms.json`，重启自动恢复（错过 10 分钟内的补发）
+- **每日新闻**：每天 09:30 推「科技 15 条 + 综合 15 条」，AI 一句话摘要，链接可点
+  - 有 90 分钟补发窗口；同一天只推一次（宁可漏发不重复）
+  - `my-im-agent --news-now --news-dry-run` 可先在终端预览
 
 ## 两种接入方式
 
@@ -83,7 +86,11 @@ my-im-agent --check --send-to <UserID>   # 给指定成员发一条测试消息
 | `IM_AGENT_LLM_MODEL` | 模型名 | `gpt-4o-mini` |
 | `IM_AGENT_MAX_TOKENS` | 单次请求 token 上限（推理模型要给足） | `4000` |
 | `IM_AGENT_MAX_TURNS` | 单会话历史条数 | `20` |
-| `IM_AGENT_DATA_DIR` | 闹钟等数据目录 | `data` |
+| `IM_AGENT_DATA_DIR` | 闹钟/新闻等数据目录 | `data` |
+| `IM_AGENT_NEWS_ENABLED` | 新闻推送开关 | `1` |
+| `IM_AGENT_NEWS_AT` | 每天推送时刻 | `09:30` |
+| `IM_AGENT_NEWS_TARGET_USER` | 接收者 UserID | `ChenKeCheng` |
+| `IM_AGENT_NEWS_TOP_N` | 每个板块条数 | `15` |
 | `WECOM_CORP_ID` | 企业 ID | — |
 | `WECOM_AGENT_ID` | 自建应用 AgentId | — |
 | `WECOM_SECRET` | 自建应用 Secret | — |

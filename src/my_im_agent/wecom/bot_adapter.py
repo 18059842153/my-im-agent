@@ -83,6 +83,8 @@ class WeComBotAdapter(IMAdapter):
         self._client: Any = None
         self._seen_ids: deque[str] = deque(maxlen=_SEEN_CAPACITY)
         self._seen_set: set[str] = set()
+        # 供 --news-now 等需要"等连接就绪"的场景使用
+        self.ready = asyncio.Event()
 
     # --- 生命周期 ---
 
@@ -104,6 +106,7 @@ class WeComBotAdapter(IMAdapter):
 
         @client.on("authenticated")
         def _on_auth() -> None:
+            self.ready.set()
             logger.info("WeCom bot authenticated (long connection ready)")
 
         @client.on("error")

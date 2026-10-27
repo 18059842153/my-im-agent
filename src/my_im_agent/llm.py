@@ -76,6 +76,26 @@ class IntentEngine(Protocol):
     ) -> IntentResult: ...
 
 
+def apply_model_settings(settings: Settings) -> None:
+    """把模型配置写进 Agently 插件。
+
+    必须**按键逐个** set：对整个 namespace 赋 dict 会覆盖掉插件默认的
+    path_mapping / content_mapping，请求会直接崩。幂等，可重复调用。
+    """
+    from agently import Agently
+
+    Agently.set_settings("plugins.ModelRequester.OpenAICompatible.base_url", settings.llm_base_url)
+    Agently.set_settings("plugins.ModelRequester.OpenAICompatible.model", settings.llm_model)
+    Agently.set_settings(
+        "plugins.ModelRequester.OpenAICompatible.auth",
+        {"api_key": settings.llm_api_key},
+    )
+    Agently.set_settings(
+        "plugins.ModelRequester.OpenAICompatible.request_options",
+        {"max_tokens": settings.max_tokens},
+    )
+
+
 class AgentlyIntentEngine:
     """用 Agently ModelRequest 承载意图识别与聊天回复。
 
@@ -84,20 +104,7 @@ class AgentlyIntentEngine:
     """
 
     def __init__(self, settings: Settings) -> None:
-        from agently import Agently
-
-        Agently.set_settings(
-            "plugins.ModelRequester.OpenAICompatible.base_url", settings.llm_base_url
-        )
-        Agently.set_settings("plugins.ModelRequester.OpenAICompatible.model", settings.llm_model)
-        Agently.set_settings(
-            "plugins.ModelRequester.OpenAICompatible.auth",
-            {"api_key": settings.llm_api_key},
-        )
-        Agently.set_settings(
-            "plugins.ModelRequester.OpenAICompatible.request_options",
-            {"max_tokens": settings.max_tokens},
-        )
+        apply_model_settings(settings)
         self._system_prompt = settings.system_prompt
 
     async def route(

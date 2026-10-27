@@ -12,6 +12,19 @@ from dotenv import load_dotenv
 DEFAULT_SYSTEM_PROMPT = "你是一个接入企业微信的 AI 助手，回答请简洁、直接、可执行。"
 
 
+def _as_bool(raw: str, default: bool = False) -> bool:
+    """环境变量布尔值解析。
+
+    直接 bool("0") 会得到 True，所以必须走白名单。
+    """
+    value = (raw or "").strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _bootstrap_dotenv() -> None:
     """向上查找 .env，最多找 3 层，避免污染其他目录。"""
     here = Path(__file__).resolve()
@@ -57,6 +70,17 @@ class Settings:
     # --- 数据 ---
     data_dir: str = "data"
 
+    # --- 每日新闻推送 ---
+    news_enabled: bool = True
+    news_at: str = "09:30"
+    news_target_user: str = "ChenKeCheng"
+    news_catchup_minutes: int = 90
+    news_top_n: int = 15
+    news_max_bytes: int = 3800
+    news_fetch_timeout: float = 15.0
+    news_total_timeout: float = 180.0
+    news_summary_chunk: int = 5
+
     extra: dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -89,6 +113,15 @@ class Settings:
             wecom_bot_secret=get_wecom("BOT_SECRET", ""),
             wecom_bot_name=get_wecom("BOT_NAME", ""),
             data_dir=get("DATA_DIR", cls.data_dir),
+            news_enabled=_as_bool(get("NEWS_ENABLED", "1"), True),
+            news_at=get("NEWS_AT", cls.news_at),
+            news_target_user=get("NEWS_TARGET_USER", cls.news_target_user),
+            news_catchup_minutes=int(get("NEWS_CATCHUP_MINUTES", str(cls.news_catchup_minutes))),
+            news_top_n=int(get("NEWS_TOP_N", str(cls.news_top_n))),
+            news_max_bytes=int(get("NEWS_MAX_BYTES", str(cls.news_max_bytes))),
+            news_fetch_timeout=float(get("NEWS_FETCH_TIMEOUT", str(cls.news_fetch_timeout))),
+            news_total_timeout=float(get("NEWS_TOTAL_TIMEOUT", str(cls.news_total_timeout))),
+            news_summary_chunk=int(get("NEWS_SUMMARY_CHUNK", str(cls.news_summary_chunk))),
         )
 
         for key, value in overrides.items():
@@ -135,6 +168,17 @@ class Settings:
                 + ", ".join(missing)
                 + "。后台：智能机器人 → 配置 → 开启「API 模式」→ 选「长连接」，"
                 "拿 BotID 和长连接专用 Secret（注意不是回调模式的 Token/AESKey）。"
+            )
+
+    @property
+    def news_configured(self) -> bool:
+        return bool(self.news_enabled and self.news_target_user)
+
+    def require_news(self) -> None:
+        """新闻推送启动前的快速失败检查。"""
+        if not self.news_target_user:
+            raise RuntimeError(
+                "新闻推送缺少接收者：请设置 IM_AGENT_NEWS_TARGET_USER（企业微信成员 UserID）。"
             )
 
     def require_wecom(self) -> None:

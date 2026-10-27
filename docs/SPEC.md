@@ -1,6 +1,6 @@
 # my-im-agent 技术规格（SPEC）
 
-版本：v0.2.0 · 最后更新：2026-10-23 17:47 (UTC+8)
+版本：v0.3.0 · 最后更新：2026-10-27 18:15 (UTC+8)
 对应提交：`f4ec8dd`（GitHub Actions CI 于 Python 3.11 / 3.12 / 3.13 均 success）
 
 ---
@@ -10,6 +10,8 @@
 | 时间 | 版本 | 变更内容 | 状态 |
 | --- | --- | --- | --- |
 | 2026-10-23 17:30 | v0.2.0 | 企业微信回调适配器 + 主动发消息 + 闹钟调度；模型层改用 Agently ModelRequest | 已实现并验证 |
+| 2026-10-27 18:15 | v0.3.0 | 每日新闻推送：RSS → 去重选条 → AI 摘要 → 09:30 定时推送（科技/综合各 15 条） | 已实现并验证 |
+| 2026-10-27 18:15 | v0.3.0 | 每日新闻推送：RSS → 去重选条 → AI 摘要 → 09:30 定时推送（科技/综合各 15 条） | 已实现并验证 |
 | 2026-10-23 16:53 | v0.1.0 | Python 骨架：配置 / Agent / Adapter 抽象 / 终端 REPL / CI | 已实现并验证 |
 
 ## 0.1 当前状态
@@ -291,6 +293,10 @@ daily/weekly/workdays:
 | L6 | 仅单聊、仅文本 | 群聊、图片、文件不处理 | 非目标 |
 | L7 | 本地时间 | 服务器时区变更会影响已存闹钟 | 部署时区固定 |
 | L8 | 闹钟列表常驻进程内存 | 手工改 `alarms.json` 后会被进程内副本覆盖 | 改文件前先停服务 |
+| L9 | 新闻摘要可能失败 | 模型 JSON 校验失败时该块退化为「仅标题」 | 三层降级 + 页脚提示，不影响推送 |
+| L10 | 新闻 at-most-once | 崩在发送中途当天不再重试（宁可漏发不重复） | `--check` 显示 `sending`，需要时 `--news-now` |
+| L9 | 新闻摘要可能失败 | 模型 JSON 校验失败时该块退化为「仅标题」 | 三层降级 + 页脚提示，不影响推送 |
+| L10 | 新闻 at-most-once | 崩在发送中途当天不再重试（宁可漏发不重复） | `--check` 显示 `sending`，需要时 `--news-now` |
 
 ---
 
@@ -301,3 +307,41 @@ daily/weekly/workdays:
 3. 工具调用（ActionRuntime）：查天气、查日程等真实能力
 4. 闹钟推送失败重试 + 死信队列
 5. 多 IM 平台（飞书 / 钉钉）复用 `IMAdapter` 抽象
+
+---
+
+## 13. 每日新闻推送（v0.3.0）
+
+**目标**：每天 09:30 主动推送一份早报，科技 15 条 + 综合 15 条，每条一句 AI 摘要。
+
+### 13.1 所有权
+
+| 决策 / 动作 | Owner | 位置 |
+| --- | --- | --- |
+| 抓取与解析 RSS（含 gb2312 / CST 时区纠正） | Host | `news.decode_xml` / `parse_feed` |
+| 跨源去重、按时间选前 15 条、跨天 `seen` 去重 | Host | `news.select_items` |
+| 压成一句话摘要 | **Model** | `news.AgentlyNewsSummarizer` |
+| 摘要 id 回显校验、缺失补位、去重排序 | Host | `news.reconcile` |
+| 渲染与按字节切分（3800B） | Host | `news.render_section` / `split_markdown` |
+| 何时推、是否已推、失败重试上限 | Host | `news.should_fire` / `NewsStateStore` |
+
+### 13.2 数据契约
+
+`NewsItem(id, title, link, source, published)`；AI 输出 `NewsDigest{items: NewsSummary{id, title, summary}}`
+（`summary` 对模型必填，`min_length=1` —— 给默认值模型会直接留空）。
+状态文件 `data/news_state.json`：`last_date/last_status/attempts/seen`。
+
+### 13.3 时序
+
+```
+09:30 tick → should_fire? → 落盘 sending → 并发抓 3 个源 → 各区选 15 条
+         → 每 5 条一 chunk 调模型（2~6 次）→ reconcile → 渲染
+         → 依次发送（科技 1 条、综合 1 条）→ 落盘 ok/partial/failed
+```
+
+补发窗口 90 分钟（09:30–11:00 内启动会补发并标注）；超出窗口记 `skipped`，
+需要时 `--news-now` 人工触发。
+
+### 13.4 已知限制
+
+见 §11 L9（摘要失败降级为标题版）、L10（at-most-once 不重复推送）。
