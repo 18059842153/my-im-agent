@@ -1,7 +1,7 @@
 """新闻推送模块的确定性测试（全部不联网，RSS 走 MockTransport）。"""
 
 import json
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -40,6 +40,12 @@ from my_im_agent.news import (
 
 NOW = datetime(2026, 10, 27, 9, 30, 0)
 AT = time(9, 30)
+CST = timezone(timedelta(hours=8))
+
+
+def as_local(instant: datetime) -> datetime:
+    """把绝对时刻换算成本地 naive 时间（测试不能假设跑在 +08:00）。"""
+    return instant.astimezone().replace(tzinfo=None)
 
 
 def make_settings(tmp_path: Path, **overrides) -> Settings:
@@ -100,7 +106,7 @@ class TestParseFeed:
         items = parse_feed(RSS_UTF8, source="测试源")
         assert [i.title for i in items] == ["IT之家新闻", "第二条"]
         assert items[0].link == "https://example.com/a"
-        assert items[0].published == datetime(2026, 10, 27, 9, 0)
+        assert items[0].published == as_local(datetime(2026, 10, 27, 9, 0, tzinfo=CST))
 
     def test_gb2312_declared(self):
         # 回归：xml.etree 遇到 gb2312 会抛 multi-byte encodings are not supported
@@ -111,7 +117,7 @@ class TestParseFeed:
         items = parse_feed(ATOM_FEED, source="测试源")
         assert items[0].title == "Atom 条目"
         assert items[0].link == "https://example.com/atom"
-        assert items[0].published == datetime(2026, 10, 27, 8, 0)
+        assert items[0].published == as_local(datetime(2026, 10, 27, 8, 0, tzinfo=CST))
 
     def test_missing_pubdate(self):
         items = parse_feed(RSS_UTF8, source="测试源")
@@ -163,23 +169,26 @@ class TestParseFeed:
 
 class TestParsePublished:
     @pytest.mark.parametrize(
-        ("raw", "expected"),
+        ("raw", "instant"),
         [
-            ("Mon, 27 Oct 2026 09:00:00 +0800", datetime(2026, 10, 27, 9, 0)),
-            ("Mon, 27 Oct 2026 01:00:00 GMT", datetime(2026, 10, 27, 9, 0)),
-            ("2026-10-27T09:00:00+08:00", datetime(2026, 10, 27, 9, 0)),
-            ("2026-10-27T01:00:00Z", datetime(2026, 10, 27, 9, 0)),
+            ("Mon, 27 Oct 2026 09:00:00 +0800", datetime(2026, 10, 27, 9, 0, tzinfo=CST)),
+            ("Mon, 27 Oct 2026 01:00:00 GMT", datetime(2026, 10, 27, 1, 0, tzinfo=UTC)),
+            ("2026-10-27T09:00:00+08:00", datetime(2026, 10, 27, 9, 0, tzinfo=CST)),
+            ("2026-10-27T01:00:00Z", datetime(2026, 10, 27, 1, 0, tzinfo=UTC)),
         ],
     )
-    def test_parses_common_formats(self, raw, expected):
-        assert parse_published(raw) == expected
+    def test_parses_common_formats(self, raw, instant):
+        # 不管测试机在哪个时区，都换算成同一绝对时刻
+        assert parse_published(raw) == as_local(instant)
 
     def test_naive_kept_as_is(self):
         assert parse_published("Mon, 27 Oct 2026 09:00:00") == datetime(2026, 10, 27, 9, 0)
 
     def test_cst_treated_as_china_time(self):
         # email 库会把 CST 当成美国中部时间（-06:00），这里必须纠正为 +08:00
-        assert parse_published("Mon, 27 Oct 2026 09:00:00 CST") == datetime(2026, 10, 27, 9, 0)
+        assert parse_published("Mon, 27 Oct 2026 09:00:00 CST") == as_local(
+            datetime(2026, 10, 27, 9, 0, tzinfo=CST)
+        )
 
     def test_garbage_returns_none(self):
         assert parse_published("昨天下午") is None
@@ -210,7 +219,7 @@ class TestFetcher:
 
         assert len(result.items) == 4
         assert result.errors == []
-        assert result.items[0].published == datetime(2026, 10, 27, 9, 0)
+        assert result.items[0].published == as_local(datetime(2026, 10, 27, 9, 0, tzinfo=CST))
 
     @pytest.mark.asyncio
     async def test_one_source_down_does_not_break_other(self):

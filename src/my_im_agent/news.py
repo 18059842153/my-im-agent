@@ -816,7 +816,8 @@ class NewsDigestService:
         if not force:
             fire, reason = should_fire(state, now, at=self._at, catchup=self._catchup)
             if not fire:
-                if reason == "expired" and persist:
+                # 只有「今天什么都没发过」才记 skipped；手动 --news-now 推送过就不要覆盖
+                if reason == "expired" and persist and state.last_date != now.date().isoformat():
                     self._state.mark_skipped(now, reason)
                 return DigestResult(ok=reason != "expired", status=reason, errors=[reason])
 
