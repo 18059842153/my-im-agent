@@ -18,6 +18,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "pycryptodome>=3.21",
+    "wecom-aibot-python-sdk>=1.0.2",
 ]
 
 [project.optional-dependencies]

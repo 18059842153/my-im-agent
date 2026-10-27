@@ -231,3 +231,52 @@ class TestListAndCancel:
         reply = await brain.handle(inbound("取消闹钟"))
 
         assert reply is not None and "查看闹钟" in reply.content
+
+
+class TestProgress:
+    """流式适配器传入的 progress 回调：要按阶段给出「正在做什么」。"""
+
+    @pytest.mark.asyncio
+    async def test_progress_reports_understanding_then_step(self, tmp_path):
+        brain, _ = make_brain(tmp_path, IntentResult(intent="chat", answer="你好"))
+        seen: list[str] = []
+
+        async def progress(text: str) -> None:
+            seen.append(text)
+
+        await brain.handle(inbound("你好"), progress)
+
+        assert seen == ["🔍 正在理解你的意思…", "💬 正在组织回答…"]
+
+    @pytest.mark.asyncio
+    async def test_progress_step_differs_per_intent(self, tmp_path):
+        future = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+        brain, _ = make_brain(
+            tmp_path,
+            IntentResult(intent="set_alarm", alarm_at=future, alarm_message="开会"),
+        )
+        seen: list[str] = []
+
+        async def progress(text: str) -> None:
+            seen.append(text)
+
+        await brain.handle(inbound("提醒我开会"), progress)
+
+        assert seen[-1] == "⏰ 正在设置闹钟…"
+
+    @pytest.mark.asyncio
+    async def test_progress_failure_does_not_break_handling(self, tmp_path):
+        brain, _ = make_brain(tmp_path, IntentResult(intent="chat", answer="ok"))
+
+        async def broken_progress(text: str) -> None:
+            raise RuntimeError("stream gone")
+
+        reply = await brain.handle(inbound("你好"), broken_progress)
+
+        assert reply is not None and reply.content == "ok"
+
+    @pytest.mark.asyncio
+    async def test_no_progress_callback_still_works(self, tmp_path):
+        brain, _ = make_brain(tmp_path, IntentResult(intent="chat", answer="ok"))
+        reply = await brain.handle(inbound("你好"))
+        assert reply is not None and reply.content == "ok"

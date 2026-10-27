@@ -7,13 +7,38 @@ owner 划分：
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
-from my_im_agent.adapters.base import InboundMessage, MessageType, OutboundMessage
+from my_im_agent.adapters.base import (
+    InboundMessage,
+    MessageType,
+    OutboundMessage,
+    ProgressFn,
+)
 from my_im_agent.alarms import MAX_FUTURE, REPEAT_RULES, Alarm, AlarmStore
 from my_im_agent.config import Settings
 from my_im_agent.llm import AlarmBrief, IntentEngine, IntentResult
+
+logger = logging.getLogger(__name__)
+
+_STEP_HINTS = {
+    "chat": "💬 正在组织回答…",
+    "set_alarm": "⏰ 正在设置闹钟…",
+    "list_alarms": "📋 正在读取闹钟列表…",
+    "cancel_alarm": "🗑 正在取消闹钟…",
+}
+
+
+async def _emit(progress: ProgressFn | None, text: str) -> None:
+    """进度展示失败绝不能影响主流程（流式通道随时可能断开）。"""
+    if progress is None:
+        return
+    try:
+        await progress(text)
+    except Exception:
+        logger.warning("progress callback failed: %s", text, exc_info=True)
 
 _REPEAT_LABELS = {
     "none": "一次性",
@@ -52,7 +77,16 @@ class Brain:
 
     # --- 对外 ---
 
-    async def handle(self, message: InboundMessage) -> OutboundMessage | None:
+    async def handle(
+        self,
+        message: InboundMessage,
+        progress: ProgressFn | None = None,
+    ) -> OutboundMessage | None:
+        """处理一条消息。
+
+        `progress` 由支持流式的适配器传入（如企业微信智能机器人），
+        用来把「正在做什么」实时展示给用户；不传则行为与之前完全一致。
+        """
         if not message.is_text or not message.content.strip():
             return None
 
@@ -68,12 +102,17 @@ class Brain:
             for a in self.alarms.list(conv)
         ]
 
+        await _emit(progress, "🔍 正在理解你的意思…")
+
         result = await self.engine.route(
             now=datetime.now(),
             user_text=message.content.strip(),
             history=list(history),
             alarms=briefs,
         )
+
+        await _emit(progress, _STEP_HINTS.get(result.intent, "⚙️ 正在处理…"))
+
         reply_text = self._apply(message, result)
 
         history.append({"role": "user", "content": message.content.strip()})

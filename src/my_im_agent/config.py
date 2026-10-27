@@ -49,6 +49,11 @@ class Settings:
     wecom_callback_port: int = 8666
     wecom_callback_path: str = "/wecom/callback"
 
+    # --- 企业微信智能机器人（长连接模式，走流式） ---
+    wecom_bot_id: str = ""
+    wecom_bot_secret: str = ""
+    wecom_bot_name: str = ""
+
     # --- 数据 ---
     data_dir: str = "data"
 
@@ -80,6 +85,9 @@ class Settings:
             wecom_callback_host=get_wecom("CALLBACK_HOST", cls.wecom_callback_host),
             wecom_callback_port=int(get_wecom("CALLBACK_PORT", str(cls.wecom_callback_port))),
             wecom_callback_path=get_wecom("CALLBACK_PATH", cls.wecom_callback_path),
+            wecom_bot_id=get_wecom("BOT_ID", ""),
+            wecom_bot_secret=get_wecom("BOT_SECRET", ""),
+            wecom_bot_name=get_wecom("BOT_NAME", ""),
             data_dir=get("DATA_DIR", cls.data_dir),
         )
 
@@ -105,6 +113,29 @@ class Settings:
                 self.wecom_encoding_aes_key,
             ]
         )
+
+    @property
+    def wecom_bot_enabled(self) -> bool:
+        """智能机器人（长连接）所需配置是否齐全。"""
+        return bool(self.wecom_bot_id and self.wecom_bot_secret)
+
+    def require_wecom_bot(self) -> None:
+        """智能机器人模式启动前的快速失败检查。"""
+        if not self.wecom_bot_enabled:
+            missing = [
+                name
+                for name, value in [
+                    ("WECOM_BOT_ID", self.wecom_bot_id),
+                    ("WECOM_BOT_SECRET", self.wecom_bot_secret),
+                ]
+                if not value
+            ]
+            raise RuntimeError(
+                "企业微信智能机器人配置缺失："
+                + ", ".join(missing)
+                + "。后台：智能机器人 → 配置 → 开启「API 模式」→ 选「长连接」，"
+                "拿 BotID 和长连接专用 Secret（注意不是回调模式的 Token/AESKey）。"
+            )
 
     def require_wecom(self) -> None:
         """企业微信模式启动前的快速失败检查。"""

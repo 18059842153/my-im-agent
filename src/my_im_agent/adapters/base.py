@@ -50,8 +50,12 @@ class OutboundMessage:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-# 收到消息后的处理函数签名
-Handler = Callable[[InboundMessage], Awaitable[OutboundMessage | None]]
+# 处理过程中的进度回调：适配器可把它转成流式刷新，让用户看到「正在做什么」
+ProgressFn = Callable[[str], Awaitable[None]]
+
+# 收到消息后的处理函数签名。支持流式的适配器会额外传入 progress，
+# 不支持的适配器只传 message 即可。
+Handler = Callable[..., Awaitable["OutboundMessage | None"]]
 
 
 class IMAdapter(ABC):

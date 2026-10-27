@@ -27,9 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--adapter",
-        choices=["console", "wecom"],
+        choices=["console", "wecom", "wecom-bot"],
         default="console",
-        help="which IM platform adapter to use (default: console)",
+        help="console=终端调试 / wecom=自建应用回调 / wecom-bot=智能机器人长连接（流式）",
     )
     parser.add_argument("--model", help="override IM_AGENT_LLM_MODEL")
     parser.add_argument("--base-url", help="override IM_AGENT_LLM_BASE_URL")
@@ -54,6 +54,10 @@ def build_engine(settings: Settings) -> IntentEngine:
 def build_adapter(name: str, settings: Settings) -> IMAdapter:
     if name == "wecom":
         return WeComAdapter(settings)
+    if name == "wecom-bot":
+        from my_im_agent.wecom.bot_adapter import WeComBotAdapter
+
+        return WeComBotAdapter(settings)
     return ConsoleAdapter()
 
 
@@ -113,6 +117,14 @@ async def _check(settings: Settings, send_to: str | None, probe_llm: bool) -> bo
         print(f"     长度={length}（应为 43）" + ("" if length == 43 else "  ⚠ 长度不对"))
     print(f"     回调地址应为：http(s)://<你的公网域名>{settings.wecom_callback_path}")
     print(f"     本地监听：{settings.wecom_callback_host}:{settings.wecom_callback_port}")
+
+    print("\n=== 智能机器人（长连接，流式） ===")
+    report("WECOM_BOT_ID", bool(settings.wecom_bot_id), _mask(settings.wecom_bot_id, 6))
+    report("WECOM_BOT_SECRET", bool(settings.wecom_bot_secret), _mask(settings.wecom_bot_secret))
+    if settings.wecom_bot_enabled:
+        print("     连接地址：wss://openws.work.weixin.qq.com（服务主动外连，无需公网 IP）")
+    else:
+        print("     [·] 未配置智能机器人；如需流式过程展示，见 docs/SETUP_WECOM.md 的「智能机器人」一节")
 
     # 接口凭据（CorpID / AgentId / Secret）与回调配置（Token / AESKey）分开检查：
     # 配到哪一步就能验到哪一步，不用等全配齐。
@@ -234,6 +246,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.adapter == "wecom":
         try:
             settings.require_wecom()
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+    elif args.adapter == "wecom-bot":
+        try:
+            settings.require_wecom_bot()
         except RuntimeError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
