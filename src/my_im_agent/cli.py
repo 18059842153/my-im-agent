@@ -243,12 +243,13 @@ async def _check_news(settings: Settings, report) -> None:
 
     at = parse_at(settings.news_at)
     offset = datetime.now().astimezone().utcoffset()
+    hours = (offset.total_seconds() / 3600) if offset else 0.0
     report(
         "开关",
         settings.news_enabled,
         "已开启" if settings.news_enabled else "已关闭（IM_AGENT_NEWS_ENABLED=0）",
     )
-    report("服务器时区", offset == timedelta(hours=8), f"UTC{offset}")
+    report("服务器时区", offset == timedelta(hours=8), f"UTC{hours:+.2f}".replace(".00", ":00"))
     report("推送时间", True, f"每天 {at:%H:%M}，补发窗口 {settings.news_catchup_minutes} 分钟")
     report("接收者", bool(settings.news_target_user), settings.news_target_user or "(空)")
 
