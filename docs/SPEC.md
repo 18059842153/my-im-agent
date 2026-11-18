@@ -43,7 +43,9 @@
 | I6 | 闹钟跨进程重启后不丢失 |
 | I7 | 处理失败时用户一定会收到一条明确反馈，不会无声失败 |
 
-**非目标**：群聊 @ 机器人、多租户、分布式部署、流式输出、多模态输入、闹钟的自然语言二次改期。
+**非目标**：多租户、分布式部署、多模态输入（图片/文件/语音）、闹钟的自然语言二次改期。
+
+> 群聊 @ 机器人与流式进度仅在智能机器人长连接模式（`wecom-bot`）提供；自建应用回调模式（`wecom`）仍为单聊、非流式。
 
 ---
 
@@ -157,7 +159,8 @@
 }
 ```
 
-- `conversation_id` = `user_id` = 企业微信成员 UserID（单聊）
+- 单聊：`conversation_id` = `user_id` = 企业微信成员 UserID
+- 群聊（仅 `wecom-bot`）：`conversation_id` = 群聊 `chatid`，`user_id` = 发言人 UserID
 - `run_at` 为**本地时间 naive datetime**，秒精度
 - 写入为整体原子替换（tmp + `os.replace`）
 
@@ -208,6 +211,8 @@ daily/weekly/workdays:
 | 常见错误 | `60020` = 出口 IP 不在「企业可信 IP」白名单（**配置项，非代码问题**） |
 
 **必需配置**：`WECOM_CORP_ID` / `WECOM_AGENT_ID` / `WECOM_SECRET` / `WECOM_TOKEN` / `WECOM_ENCODING_AES_KEY`，缺失时 `require_wecom()` 快速失败。
+
+**智能机器人（`wecom-bot`）必需配置**：`WECOM_BOT_ID` / `WECOM_BOT_SECRET`，缺失时 `require_wecom_bot()` 快速失败；`WECOM_BOT_NAME` 可选，机器人名字含空格时用于精确剥离群聊 @ 前缀。
 
 ---
 
@@ -290,7 +295,7 @@ daily/weekly/workdays:
 | L3 | 闹钟推送失败不重试 | 网络抖动时该次提醒丢失（一次性闹钟仍会被移除） | 后续加失败队列与退避重试 |
 | L4 | 无用户鉴权/配额 | 任何能通过验签的请求都被处理 | 依赖企业微信验签（需 Token+AESKey） |
 | L5 | 时间由模型解析 | 分钟级表述在边界时刻可能被顺延到次日 | 已在 `_set_alarm` 明确拒绝过期并提示 |
-| L6 | 仅单聊、仅文本 | 群聊、图片、文件不处理 | 非目标 |
+| L6 | 回调模式仅单聊、仅文本 | `wecom` 回调不处理群聊、图片、文件；群聊仅 `wecom-bot` 长连接模式可用，且仅支持文本 | 非目标收窄 |
 | L7 | 本地时间 | 服务器时区变更会影响已存闹钟 | 部署时区固定 |
 | L8 | 闹钟列表常驻进程内存 | 手工改 `alarms.json` 后会被进程内副本覆盖 | 改文件前先停服务 |
 | L9 | 新闻摘要可能失败 | 模型 JSON 校验失败时该块退化为「仅标题」 | 三层降级 + 页脚提示，不影响推送 |
@@ -303,7 +308,7 @@ daily/weekly/workdays:
 ## 12. 演进方向（未承诺）
 
 1. 闹钟持久化从 JSON 换 SQLite（并发与查询更好）
-2. 群聊 @ 机器人 + 会话维度改为 `corp + chat_id`
+2. 群聊会话 id 增加 corp 维度（当前 `conversation_id` 直接使用 `chatid`）
 3. 工具调用（ActionRuntime）：查天气、查日程等真实能力
 4. 闹钟推送失败重试 + 死信队列
 5. 多 IM 平台（飞书 / 钉钉）复用 `IMAdapter` 抽象

@@ -30,6 +30,7 @@ AlarmScheduler ──(到点)──> 主动发消息 API <─── 回复文本
 - **每日新闻**：每天 09:30 推「科技 15 条 + 综合 15 条」，AI 一句话摘要，链接可点
   - 有 90 分钟补发窗口；同一天只推一次（宁可漏发不重复）
   - `my-im-agent --news-now --news-dry-run` 可先在终端预览
+- **群聊 @ 机器人**（`wecom-bot`）：自动剥离 @ 前缀，按群 `chatid` 维护独立会话
 
 ## 两种接入方式
 
@@ -98,6 +99,8 @@ my-im-agent --check --send-to <UserID>   # 给指定成员发一条测试消息
 | `WECOM_ENCODING_AES_KEY` | 回调 EncodingAESKey（43 位） | — |
 | `WECOM_CALLBACK_HOST` / `WECOM_CALLBACK_PORT` | 回调监听地址 | `0.0.0.0` / `8666` |
 | `WECOM_CALLBACK_PATH` | 回调路径 | `/wecom/callback` |
+| `WECOM_BOT_ID` / `WECOM_BOT_SECRET` | 智能机器人长连接凭据（`--adapter wecom-bot` 必填） | — |
+| `WECOM_BOT_NAME` | 机器人名字（含空格时用于精确剥离群聊 @ 前缀） | 空 |
 
 ## 设计要点（owner 划分）
 
@@ -120,7 +123,8 @@ src/my_im_agent/
 ├── wecom/
 │   ├── crypto.py       # 回调加解密 + 签名（AES-256-CBC / sha1）
 │   ├── api.py          # access_token 缓存 + 主动发消息
-│   └── adapter.py      # FastAPI 回调服务 + 队列 + worker
+│   ├── adapter.py      # FastAPI 回调服务 + 队列 + worker
+│   └── bot_adapter.py  # 智能机器人长连接 + 流式 + 群聊适配
 └── cli.py              # 装配入口
 tests/                  # 50 个测试：加解密 / 调度 / 意图副作用 / 回调接口
 docs/SPEC.md            # 技术规格：所有权账本 / 节点账本 / 数据契约 / 已知限制
