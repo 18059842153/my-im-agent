@@ -61,11 +61,17 @@ def build_inbound(body: dict[str, Any], bot_name: str | None = None) -> InboundM
     chat_type = body.get("chattype", "single")
     # 单聊没有 chatid，用 userid 当会话 id；群聊用 chatid
     conversation_id = body.get("chatid") or user_id
+    # 群聊里每个人独立会话（历史与闹钟互不串），投递目标仍是群 chatid
+    if chat_type == "group" and user_id:
+        session_id = f"{conversation_id}:{user_id}"
+    else:
+        session_id = user_id
 
     return InboundMessage(
         content=content,
         user_id=user_id,
         conversation_id=conversation_id,
+        session_id=session_id,
         message_type=MessageType.TEXT,
         message_id=body.get("msgid", ""),
         raw={"chattype": chat_type},

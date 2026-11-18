@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -83,6 +84,42 @@ class TestAlarmStore:
         store = AlarmStore(tmp_path / "alarms.json")
         with pytest.raises(ValueError):
             store.add(conversation_id="c1", user_id="u1", run_at=NOW, message="m", repeat="hourly")
+
+    def test_list_filters_by_session_id(self, tmp_path):
+        store = AlarmStore(tmp_path / "alarms.json")
+        store.add(
+            conversation_id="CHAT", user_id="A", run_at=NOW, message="A 的", session_id="CHAT:A"
+        )
+        store.add(
+            conversation_id="CHAT", user_id="B", run_at=NOW, message="B 的", session_id="CHAT:B"
+        )
+
+        items = store.list("CHAT:A")
+
+        assert [a.message for a in items] == ["A 的"]
+        assert store.list("CHAT") == []  # 群投递目标不再作为归属键
+
+    def test_old_data_without_session_id_falls_back_to_conversation(self, tmp_path):
+        path = tmp_path / "alarms.json"
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": 1,
+                        "conversation_id": "c1",
+                        "user_id": "u1",
+                        "run_at": NOW.isoformat(),
+                        "message": "旧数据",
+                        "repeat": "none",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        store = AlarmStore(path)
+
+        assert [a.message for a in store.list("c1")] == ["旧数据"]
 
 
 class TestNextRun:

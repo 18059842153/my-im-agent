@@ -29,6 +29,9 @@ class InboundMessage:
     content: str
     user_id: str
     conversation_id: str
+    # 会话归属：历史与闹钟按它隔离。群聊为「chatid:userid」（每人独立），
+    # 单聊留空，回落 conversation_id。
+    session_id: str = ""
     message_type: MessageType = MessageType.TEXT
     message_id: str = field(default_factory=_new_id)
     timestamp: float = field(default_factory=time.time)

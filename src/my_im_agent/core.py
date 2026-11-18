@@ -91,7 +91,9 @@ class Brain:
             return None
 
         conv = message.conversation_id
-        history = self._histories[conv]
+        # 会话归属：群聊每人独立（chatid:userid），单聊回落 conversation_id
+        session = message.session_id or conv
+        history = self._histories[session]
         briefs = [
             AlarmBrief(
                 id=a.id,
@@ -99,7 +101,7 @@ class Brain:
                 message=a.message,
                 repeat=a.repeat,
             )
-            for a in self.alarms.list(conv)
+            for a in self.alarms.list(session)
         ]
 
         await _emit(progress, "🔍 正在理解你的意思…")
@@ -113,7 +115,7 @@ class Brain:
 
         await _emit(progress, _STEP_HINTS.get(result.intent, "⚙️ 正在处理…"))
 
-        reply_text = self._apply(message, result)
+        reply_text = self._apply(message, result, session)
 
         history.append({"role": "user", "content": message.content.strip()})
         history.append({"role": "assistant", "content": reply_text})
@@ -126,23 +128,23 @@ class Brain:
             raw={"user_id": message.user_id},
         )
 
-    def reset(self, conversation_id: str) -> None:
-        self._histories.pop(conversation_id, None)
+    def reset(self, session_id: str) -> None:
+        self._histories.pop(session_id, None)
 
     # --- host 侧效果（确定性，全部可测） ---
 
-    def _apply(self, message: InboundMessage, result: IntentResult) -> str:
+    def _apply(self, message: InboundMessage, result: IntentResult, session_id: str) -> str:
         if result.intent == "chat":
             return result.answer.strip() or "（我这次没生成出回复，请再说一遍）"
         if result.intent == "list_alarms":
-            return self._format_alarms(message.conversation_id)
+            return self._format_alarms(session_id)
         if result.intent == "cancel_alarm":
-            return self._cancel_alarm(message.conversation_id, result.cancel_id)
+            return self._cancel_alarm(session_id, result.cancel_id)
         if result.intent == "set_alarm":
-            return self._set_alarm(message, result)
+            return self._set_alarm(message, result, session_id)
         return "我暂时没理解这句话，换个说法试试？"
 
-    def _set_alarm(self, message: InboundMessage, result: IntentResult) -> str:
+    def _set_alarm(self, message: InboundMessage, result: IntentResult, session_id: str) -> str:
         if not result.alarm_at:
             return "我没听清时间。比如：「明天早上9点提醒我开会」「10分钟后提醒我喝水」。"
         try:
@@ -164,6 +166,7 @@ class Brain:
 
         alarm: Alarm = self.alarms.add(
             conversation_id=message.conversation_id,
+            session_id=session_id,
             user_id=message.user_id,
             run_at=run_at,
             message=alarm_message,
@@ -175,17 +178,17 @@ class Brain:
             "回复「查看闹钟」可管理。"
         )
 
-    def _cancel_alarm(self, conversation_id: str, cancel_id: int | None) -> str:
+    def _cancel_alarm(self, session_id: str, cancel_id: int | None) -> str:
         if cancel_id is None:
             return "你想取消哪一个？先对我说「查看闹钟」看看编号。"
-        alarm = self.alarms.get(conversation_id, cancel_id)
+        alarm = self.alarms.get(session_id, cancel_id)
         if alarm is None:
             return f"没有找到 #{cancel_id} 这个闹钟。回复「查看闹钟」确认编号。"
-        self.alarms.remove(conversation_id, cancel_id)
+        self.alarms.remove(session_id, cancel_id)
         return f"已取消闹钟 #{cancel_id}（{alarm.run_at:%Y-%m-%d %H:%M} {alarm.message}）。"
 
-    def _format_alarms(self, conversation_id: str) -> str:
-        items = self.alarms.list(conversation_id)
+    def _format_alarms(self, session_id: str) -> str:
+        items = self.alarms.list(session_id)
         if not items:
             return "当前没有闹钟。比如对我说「明天早上9点提醒我开会」。"
         lines = ["当前闹钟："]

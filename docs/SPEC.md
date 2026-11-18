@@ -152,6 +152,7 @@
 {
   "id": 1,
   "conversation_id": "ZhangSan",
+  "session_id": "ZhangSan",
   "user_id": "ZhangSan",
   "run_at": "2026-10-24T09:00:00",
   "message": "开会",
@@ -159,16 +160,18 @@
 }
 ```
 
-- 单聊：`conversation_id` = `user_id` = 企业微信成员 UserID
-- 群聊（仅 `wecom-bot`）：`conversation_id` = 群聊 `chatid`，`user_id` = 发言人 UserID
+- `conversation_id` 是**投递目标**：单聊 = 成员 UserID；群聊（仅 `wecom-bot`）= 群 `chatid`
+- `session_id` 是**归属键**（历史与闹钟按它隔离）：单聊 = 成员 UserID；群聊 = `chatid:userid`，群内每人一套
+- `user_id` 是发言人 UserID；旧 `alarms.json` 没有 `session_id` 时回落到 `conversation_id`
 - `run_at` 为**本地时间 naive datetime**，秒精度
 - 写入为整体原子替换（tmp + `os.replace`）
 
 ### 5.3 消息模型
 
-`InboundMessage(content, user_id, conversation_id, message_type, message_id, timestamp, raw)`
+`InboundMessage(content, user_id, conversation_id, session_id, message_type, message_id, timestamp, raw)`
 `OutboundMessage(content, conversation_id, reply_to, message_type, raw)`
 
+> `session_id` 为空时回落 `conversation_id`（单聊/终端模式无需显式设置）；`OutboundMessage.conversation_id` 始终是投递目标，闹钟到点仍推送到群。
 > `OutboundMessage.raw["user_id"]` 是适配器发送所需的收件人标识——由 `Brain` 从入站消息带入，避免适配器反查。
 
 ---
@@ -308,7 +311,7 @@ daily/weekly/workdays:
 ## 12. 演进方向（未承诺）
 
 1. 闹钟持久化从 JSON 换 SQLite（并发与查询更好）
-2. 群聊会话 id 增加 corp 维度（当前 `conversation_id` 直接使用 `chatid`）
+2. 群聊会话 id 增加 corp 维度（当前 `session_id` 为 `chatid:userid`）
 3. 工具调用（ActionRuntime）：查天气、查日程等真实能力
 4. 闹钟推送失败重试 + 死信队列
 5. 多 IM 平台（飞书 / 钉钉）复用 `IMAdapter` 抽象

@@ -44,6 +44,7 @@ class TestBuildInbound:
         assert msg.content == "你好"
         assert msg.user_id == "ZhangSan"
         assert msg.conversation_id == "ZhangSan"  # 单聊无 chatid，回落 userid
+        assert msg.session_id == "ZhangSan"
         assert msg.message_id == "m1"
         assert msg.raw["chattype"] == "single"
 
@@ -62,6 +63,7 @@ class TestBuildInbound:
         assert msg is not None
         assert msg.content == "查看闹钟"
         assert msg.conversation_id == "CHAT_ABC"
+        assert msg.session_id == "CHAT_ABC:LiSi"  # 群内按人隔离会话
         assert msg.user_id == "LiSi"
 
     @pytest.mark.parametrize("msgtype", ["image", "file", "voice", "video", "mixed"])

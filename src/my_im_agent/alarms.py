@@ -31,16 +31,18 @@ NotifyFn = Callable[[str, str, str], Awaitable[None]]  # (user_id, conversation_
 @dataclass
 class Alarm:
     id: int
-    conversation_id: str
+    conversation_id: str  # 消息投递目标（群聊为 chatid）
     user_id: str
     run_at: datetime  # 本地时间，naive
     message: str
     repeat: str = "none"
+    session_id: str = ""  # 归属会话（群聊为 chatid:userid）；空则回落 conversation_id
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "conversation_id": self.conversation_id,
+            "session_id": self.session_id,
             "user_id": self.user_id,
             "run_at": self.run_at.isoformat(timespec="seconds"),
             "message": self.message,
@@ -56,7 +58,14 @@ class Alarm:
             run_at=datetime.fromisoformat(data["run_at"]),
             message=str(data["message"]),
             repeat=str(data.get("repeat", "none")),
+            # 旧数据没有 session_id：回落 conversation_id，行为与升级前一致
+            session_id=str(data.get("session_id") or ""),
         )
+
+
+def alarm_scope(alarm: Alarm) -> str:
+    """闹钟归属键：优先 session_id，旧数据回落到 conversation_id。"""
+    return alarm.session_id or alarm.conversation_id
 
 
 def next_run(run_at: datetime, repeat: str, now: datetime) -> datetime | None:
@@ -112,17 +121,17 @@ class AlarmStore:
 
     # --- 查询 / 修改（调用方自行保证在锁外读到的列表不会被并发修改，返回副本） ---
 
-    def list(self, conversation_id: str | None = None) -> list[Alarm]:
+    def list(self, session_id: str | None = None) -> list[Alarm]:
         with self._lock:
             items = self._alarms
-            if conversation_id is not None:
-                items = [a for a in items if a.conversation_id == conversation_id]
+            if session_id is not None:
+                items = [a for a in items if alarm_scope(a) == session_id]
             return sorted(items, key=lambda a: a.run_at)
 
-    def get(self, conversation_id: str, alarm_id: int) -> Alarm | None:
+    def get(self, session_id: str, alarm_id: int) -> Alarm | None:
         with self._lock:
             for alarm in self._alarms:
-                if alarm.conversation_id == conversation_id and alarm.id == alarm_id:
+                if alarm_scope(alarm) == session_id and alarm.id == alarm_id:
                     return alarm
             return None
 
@@ -134,6 +143,7 @@ class AlarmStore:
         run_at: datetime,
         message: str,
         repeat: str = "none",
+        session_id: str | None = None,
     ) -> Alarm:
         if repeat not in REPEAT_RULES:
             raise ValueError(f"repeat must be one of {REPEAT_RULES}")
@@ -146,18 +156,20 @@ class AlarmStore:
                 run_at=run_at.replace(microsecond=0),
                 message=message,
                 repeat=repeat,
+                # 未显式指定归属时按投递目标处理，保持旧调用方语义不变
+                session_id=session_id or conversation_id,
             )
             self._alarms.append(alarm)
             self._save()
             return alarm
 
-    def remove(self, conversation_id: str, alarm_id: int) -> bool:
+    def remove(self, session_id: str, alarm_id: int) -> bool:
         with self._lock:
             before = len(self._alarms)
             self._alarms = [
                 a
                 for a in self._alarms
-                if not (a.conversation_id == conversation_id and a.id == alarm_id)
+                if not (alarm_scope(a) == session_id and a.id == alarm_id)
             ]
             changed = len(self._alarms) != before
             if changed:
@@ -172,11 +184,11 @@ class AlarmStore:
         """就地更新（调度器推进 run_at 后调用）。"""
         with self._lock:
             for i, existing in enumerate(self._alarms):
-                if existing.id == alarm.id and existing.conversation_id == alarm.conversation_id:
+                if existing.id == alarm.id and alarm_scope(existing) == alarm_scope(alarm):
                     self._alarms[i] = alarm
                     self._save()
                     return
-            raise KeyError(f"alarm #{alarm.id} not found in {alarm.conversation_id}")
+            raise KeyError(f"alarm #{alarm.id} not found in {alarm_scope(alarm)}")
 
 
 class AlarmScheduler:
@@ -227,7 +239,7 @@ class AlarmScheduler:
                     alarm.run_at = next_run(alarm.run_at, alarm.repeat, now)  # type: ignore[assignment]
                     self._store.update(alarm)
                 else:
-                    self._store.remove(alarm.conversation_id, alarm.id)
+                    self._store.remove(alarm_scope(alarm), alarm.id)
                     logger.info("drop expired one-shot alarm #%s", alarm.id)
 
     async def _tick(self, now: datetime) -> None:
@@ -241,7 +253,7 @@ class AlarmScheduler:
             logger.exception("failed to notify alarm #%s", alarm.id)
         nxt = next_run(alarm.run_at, alarm.repeat, now)
         if nxt is None:
-            self._store.remove(alarm.conversation_id, alarm.id)
+            self._store.remove(alarm_scope(alarm), alarm.id)
         else:
             alarm.run_at = nxt
             self._store.update(alarm)

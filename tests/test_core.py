@@ -40,8 +40,12 @@ def make_brain(tmp_path: Path, result: IntentResult) -> tuple[Brain, FakeEngine]
     return Brain(engine, store, make_settings()), engine
 
 
-def inbound(text: str, conv: str = "c1", user: str = "u1") -> InboundMessage:
-    return InboundMessage(content=text, user_id=user, conversation_id=conv)
+def inbound(
+    text: str, conv: str = "c1", user: str = "u1", session: str = ""
+) -> InboundMessage:
+    return InboundMessage(
+        content=text, user_id=user, conversation_id=conv, session_id=session
+    )
 
 
 class TestParseLocalTime:
@@ -95,6 +99,16 @@ class TestChat:
         assert await brain.handle(inbound("   ")) is None
         assert engine.calls == []
 
+    @pytest.mark.asyncio
+    async def test_group_members_get_independent_history(self, tmp_path):
+        brain, engine = make_brain(tmp_path, IntentResult(intent="chat", answer="ok"))
+
+        await brain.handle(inbound("A 的话", conv="CHAT", user="A", session="CHAT:A"))
+        await brain.handle(inbound("B 的话", conv="CHAT", user="B", session="CHAT:B"))
+
+        # 同一个群，但 B 看不到 A 的历史
+        assert engine.calls[1]["history"] == []
+
 
 class TestSetAlarm:
     @pytest.mark.asyncio
@@ -111,6 +125,23 @@ class TestSetAlarm:
         assert "已设好闹钟 #1" in reply.content
         assert "开会" in reply.content
         assert len(brain.alarms.list("c1")) == 1
+
+    @pytest.mark.asyncio
+    async def test_group_members_alarms_are_isolated_but_push_to_group(self, tmp_path):
+        future = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+        brain, _ = make_brain(
+            tmp_path,
+            IntentResult(intent="set_alarm", alarm_at=future, alarm_message="开会"),
+        )
+
+        await brain.handle(inbound("提醒我", conv="CHAT", user="A", session="CHAT:A"))
+        await brain.handle(inbound("提醒我", conv="CHAT", user="B", session="CHAT:B"))
+
+        a_alarms = brain.alarms.list("CHAT:A")
+        b_alarms = brain.alarms.list("CHAT:B")
+        assert len(a_alarms) == 1 and len(b_alarms) == 1
+        assert a_alarms[0].conversation_id == "CHAT"  # 到点仍推到群里
+        assert b_alarms[0].user_id == "B"
 
     @pytest.mark.asyncio
     async def test_past_time_rejected_without_side_effect(self, tmp_path):
