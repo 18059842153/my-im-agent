@@ -27,7 +27,9 @@ AlarmScheduler ──(到点)──> 主动发消息 API <─── 回复文本
   - 「明天早上9点提醒我开会」「10分钟后提醒我喝水」「每个工作日下午6点提醒我填日报」
   - 「查看闹钟」「取消闹钟 1」
 - 闹钟持久化到 `data/alarms.json`，重启自动恢复（错过 10 分钟内的补发）
-- **每日新闻**：每天 09:30 推「科技 15 条 + 综合 15 条」，AI 一句话摘要，链接可点
+- **每日新闻**：每天 09:30 推「科技 15 + 综合 15 + AI 前沿 10」，每条 2~3 个事实要点，30 秒可扫完
+  - 自动抓取正文再压缩，保留主体、数字和影响；AI 板块含掘金、量子位、InfoQ
+  - 当天完整版归档为 md/html，可通过 `IM_AGENT_NEWS_PUBLIC_BASE_URL` 提供的地址下载
   - 有 90 分钟补发窗口；同一天只推一次（宁可漏发不重复）
   - `my-im-agent --news-now --news-dry-run` 可先在终端预览
 
@@ -91,6 +93,12 @@ my-im-agent --check --send-to <UserID>   # 给指定成员发一条测试消息
 | `IM_AGENT_NEWS_AT` | 每天推送时刻 | `09:30` |
 | `IM_AGENT_NEWS_TARGET_USER` | 接收者 UserID | `ChenKeCheng` |
 | `IM_AGENT_NEWS_TOP_N` | 每个板块条数 | `15` |
+| `IM_AGENT_NEWS_ARTICLE_FETCH` | 抓正文再压缩（失败自动退回 RSS 描述） | `1` |
+| `IM_AGENT_NEWS_PUBLIC_BASE_URL` | 下载地址前缀，如 `http://1.2.3.4:8677` | 空（不生成链接） |
+| `IM_AGENT_NEWS_SERVE_PORT` | 内置下载服务端口 | `8677` |
+| `IM_AGENT_NEWS_TOKEN` | 下载口令（可选，设置后链接带 `?token=`） | 空 |
+| `IM_AGENT_NEWS_ARCHIVE_DIR` | 新闻归档目录 | `data/news` |
+| `IM_AGENT_NEWS_RSSHUB_BASE` | 掘金 RSSHub 地址（自建填内网） | `https://rsshub.app` |
 | `WECOM_CORP_ID` | 企业 ID | — |
 | `WECOM_AGENT_ID` | 自建应用 AgentId | — |
 | `WECOM_SECRET` | 自建应用 Secret | — |

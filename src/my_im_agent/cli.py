@@ -7,6 +7,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 
 from my_im_agent.adapters.base import IMAdapter, OutboundMessage
@@ -83,18 +84,38 @@ def build_summarizer(settings: Settings):
 
 
 def build_news_scheduler(settings: Settings, notify) -> tuple:
-    from my_im_agent.news import NewsDigestService, NewsFetcher, NewsScheduler, NewsStateStore
+    from my_im_agent.news import (
+        NewsDigestService,
+        NewsFetcher,
+        NewsScheduler,
+        NewsStateStore,
+    )
 
     state = NewsStateStore(Path(settings.data_dir) / "news_state.json")
     fetcher = NewsFetcher(timeout=settings.news_fetch_timeout)
+    article_fetcher = build_article_fetcher(settings)
     service = NewsDigestService(
         settings=settings,
         state=state,
         fetcher=fetcher,
         summarizer=build_summarizer(settings),
         notify=notify,
+        article_fetcher=article_fetcher,
     )
-    return NewsScheduler(service, settings), fetcher
+    return NewsScheduler(service, settings), fetcher, article_fetcher
+
+
+def build_article_fetcher(settings: Settings):
+    from my_im_agent.news import ArticleFetcher
+
+    if not settings.news_article_fetch:
+        return None
+    return ArticleFetcher(
+        timeout=settings.news_article_timeout,
+        max_bytes=settings.news_article_max_bytes,
+        concurrency=settings.news_article_concurrency,
+        chars=settings.news_article_chars,
+    )
 
 
 # --- 体检 ---
@@ -252,6 +273,28 @@ async def _check_news(settings: Settings, report) -> None:
     report("服务器时区", offset == timedelta(hours=8), f"UTC{hours:+.2f}".replace(".00", ":00"))
     report("推送时间", True, f"每天 {at:%H:%M}，补发窗口 {settings.news_catchup_minutes} 分钟")
     report("接收者", bool(settings.news_target_user), settings.news_target_user or "(空)")
+    report(
+        "每板块条数",
+        True,
+        "科技/综合 "
+        + str(settings.news_top_n)
+        + "，AI 前沿 "
+        + str(next((s.limit for s in SECTIONS if s.key == "ai"), 10)),
+    )
+    report("归档目录", True, str(settings.news_archive_path))
+    if settings.news_public_base_url:
+        hint = "（需带 token）" if settings.news_token else ""
+        report(
+            "下载地址",
+            True,
+            f"{settings.news_public_base_url}/news/latest.html{hint}",
+        )
+    else:
+        report(
+            "下载地址",
+            True,
+            "未配置 IM_AGENT_NEWS_PUBLIC_BASE_URL（只落盘，不提供链接）",
+        )
 
     if not settings.news_enabled:
         return
@@ -282,6 +325,7 @@ async def _news_now(settings: Settings, adapter_name: str, *, dry_run: bool) -> 
     from my_im_agent.news import NewsDigestService, NewsFetcher, NewsStateStore
 
     fetcher = NewsFetcher(timeout=settings.news_fetch_timeout)
+    article_fetcher = build_article_fetcher(settings)
     state = NewsStateStore(Path(settings.data_dir) / "news_state.json")
     adapter = None
     task: asyncio.Task | None = None
@@ -311,6 +355,8 @@ async def _news_now(settings: Settings, adapter_name: str, *, dry_run: bool) -> 
                 if adapter is not None:
                     await adapter.close()
                 await fetcher.aclose()
+                if article_fetcher is not None:
+                    await article_fetcher.aclose()
                 return 2
 
     service = NewsDigestService(
@@ -319,11 +365,14 @@ async def _news_now(settings: Settings, adapter_name: str, *, dry_run: bool) -> 
         fetcher=fetcher,
         summarizer=build_summarizer(settings),
         notify=notify,
+        article_fetcher=article_fetcher,
     )
     try:
         result = await service.deliver(datetime.now(), force=True, persist=not dry_run)
     finally:
         await fetcher.aclose()
+        if article_fetcher is not None:
+            await article_fetcher.aclose()
         if task is not None:
             task.cancel()
         if adapter is not None:
@@ -331,6 +380,10 @@ async def _news_now(settings: Settings, adapter_name: str, *, dry_run: bool) -> 
 
     if result.errors:
         print("问题：" + "；".join(result.errors), file=sys.stderr)
+    if result.archive_url:
+        print(f"下载地址：{result.archive_url}")
+    else:
+        print(f"归档目录：{settings.news_archive_path}（未配置 IM_AGENT_NEWS_PUBLIC_BASE_URL）")
     print(f"结果：status={result.status} 消息数={len(result.messages)}")
     return 0 if result.ok else 1
 
@@ -365,12 +418,27 @@ async def _run(adapter_name: str, settings: Settings) -> int:
 
     news_scheduler = None
     news_fetcher = None
+    news_article_fetcher = None
+    news_server_task: asyncio.Task | None = None
     if settings.news_enabled:
-        news_scheduler, news_fetcher = build_news_scheduler(settings, notify_md)
+        news_scheduler, news_fetcher, news_article_fetcher = build_news_scheduler(
+            settings, notify_md
+        )
+        if settings.news_public_base_url:
+            from my_im_agent.news_server import create_app, serve
+
+            app = create_app(
+                archive_dir=settings.news_archive_path, token=settings.news_token
+            )
+            news_server_task = asyncio.create_task(
+                serve(app, host=settings.news_serve_host, port=settings.news_serve_port)
+            )
 
     coros = [scheduler.start(), adapter.start(brain.handle)]
     if news_scheduler is not None:
         coros.insert(0, news_scheduler.start())
+    if news_server_task is not None:
+        coros.append(news_server_task)
 
     try:
         await asyncio.gather(*coros)
@@ -382,6 +450,12 @@ async def _run(adapter_name: str, settings: Settings) -> int:
             news_scheduler.stop()
         if news_fetcher is not None:
             await news_fetcher.aclose()
+        if news_article_fetcher is not None:
+            await news_article_fetcher.aclose()
+        if news_server_task is not None:
+            news_server_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await news_server_task
         await adapter.close()
     return 0
 

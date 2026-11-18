@@ -80,6 +80,18 @@ class Settings:
     news_fetch_timeout: float = 15.0
     news_total_timeout: float = 180.0
     news_summary_chunk: int = 5
+    # 正文补抓（抓不到就用 RSS 描述兜底）
+    news_article_fetch: bool = True
+    news_article_timeout: float = 12.0
+    news_article_max_bytes: int = 400_000
+    news_article_concurrency: int = 5
+    news_article_chars: int = 1200
+    # 当天归档与下载服务
+    news_archive_dir: str = ""  # 空 → {data_dir}/news
+    news_public_base_url: str = ""  # 如 https://news.example.com
+    news_serve_host: str = "0.0.0.0"
+    news_serve_port: int = 8677
+    news_token: str = ""
 
     extra: dict[str, str] = field(default_factory=dict)
 
@@ -122,6 +134,24 @@ class Settings:
             news_fetch_timeout=float(get("NEWS_FETCH_TIMEOUT", str(cls.news_fetch_timeout))),
             news_total_timeout=float(get("NEWS_TOTAL_TIMEOUT", str(cls.news_total_timeout))),
             news_summary_chunk=int(get("NEWS_SUMMARY_CHUNK", str(cls.news_summary_chunk))),
+            news_article_fetch=_as_bool(get("NEWS_ARTICLE_FETCH", "1"), True),
+            news_article_timeout=float(
+                get("NEWS_ARTICLE_TIMEOUT", str(cls.news_article_timeout))
+            ),
+            news_article_max_bytes=int(
+                get("NEWS_ARTICLE_MAX_BYTES", str(cls.news_article_max_bytes))
+            ),
+            news_article_concurrency=int(
+                get("NEWS_ARTICLE_CONCURRENCY", str(cls.news_article_concurrency))
+            ),
+            news_article_chars=int(get("NEWS_ARTICLE_CHARS", str(cls.news_article_chars))),
+            news_archive_dir=get("NEWS_ARCHIVE_DIR", cls.news_archive_dir),
+            news_public_base_url=get(
+                "NEWS_PUBLIC_BASE_URL", cls.news_public_base_url
+            ).rstrip("/"),
+            news_serve_host=get("NEWS_SERVE_HOST", cls.news_serve_host),
+            news_serve_port=int(get("NEWS_SERVE_PORT", str(cls.news_serve_port))),
+            news_token=get("NEWS_TOKEN", cls.news_token),
         )
 
         for key, value in overrides.items():
@@ -173,6 +203,11 @@ class Settings:
     @property
     def news_configured(self) -> bool:
         return bool(self.news_enabled and self.news_target_user)
+
+    @property
+    def news_archive_path(self) -> Path:
+        """当天归档目录：默认 {data_dir}/news。"""
+        return Path(self.news_archive_dir) if self.news_archive_dir else Path(self.data_dir) / "news"
 
     def require_news(self) -> None:
         """新闻推送启动前的快速失败检查。"""

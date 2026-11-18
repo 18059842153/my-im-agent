@@ -1,13 +1,15 @@
-"""每日新闻推送：抓 RSS → 去重选条 → AI 摘要 → 渲染 → 定时推送。
+"""每日新闻推送：抓 RSS → 补正文 → 去重选条 → AI 压缩要点 → 渲染 → 定时推送。
 
 owner 划分（与 alarms.py 同风格）：
-- host：抓取、解析、去重、选条、切分、幂等记账、定时、发送
-- model：只负责把标题压成一句摘要（Agently ModelRequest），失败一律走标题版兜底
+- host：抓取、解析、补正文、去重、选条、渲染、切分、归档、幂等记账、定时、发送
+- model：只负责把「标题 + 正文摘录」压成 2~3 条事实要点（Agently ModelRequest），
+  失败一律走正文/标题兜底
 
 设计要点见 docs/SPEC.md「新闻推送」章：
 - 每天 09:30 触发，90 分钟补发窗口，超出窗口记为 skipped（不推过期早报）
 - at-most-once：先落盘 sending 再发送，宁可漏发也不重复推两条长早报
-- 科技 / 综合各 15 条，各自一条消息，超长按行切分（中文按 UTF-8 字节算）
+- 科技 15 条 / 综合 15 条 / AI 前沿 10 条，各自一条消息，超长按行切分
+- 当天完整版同时归档为 md + html，可通过 IM_AGENT_NEWS_PUBLIC_BASE_URL 下载
 """
 
 from __future__ import annotations
@@ -21,9 +23,10 @@ import re
 import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
@@ -33,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from my_im_agent.alarms import NotifyFn
 from my_im_agent.config import Settings
+from my_im_agent.news_archive import NewsArchive
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,8 @@ DEFAULT_CATCHUP = timedelta(minutes=90)
 SEEN_RETENTION_DAYS = 7
 MAX_ATTEMPTS = 3
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
+# 掘金没有官方 RSS，默认走公共 RSSHub；自建时用 IM_AGENT_NEWS_RSSHUB_BASE 指向内网实例
+RSSHUB_BASE = os.environ.get("IM_AGENT_NEWS_RSSHUB_BASE", "https://rsshub.app").rstrip("/")
 
 
 # --------------------------------------------------------------------------- #
@@ -54,6 +60,7 @@ class NewsItem:
     link: str
     source: str
     published: datetime | None = None
+    detail: str = ""  # RSS 摘要或抓到的正文摘录（纯文本）
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class Section:
     key: str
     label: str
     feeds: tuple[FeedSource, ...]
+    limit: int | None = None  # None 表示用 IM_AGENT_NEWS_TOP_N
 
 
 @dataclass
@@ -90,6 +98,18 @@ SECTIONS: tuple[Section, ...] = (
         "综合",
         (FeedSource("中国新闻网", "https://www.chinanews.com.cn/rss/scroll-news.xml"),),
     ),
+    Section(
+        "ai",
+        "AI 前沿",
+        (
+            # 掘金没有官方 RSS，走 RSSHub 的 AI 分类；自建 RSSHub 时替换域名即可
+            FeedSource("掘金 AI", f"{RSSHUB_BASE}/juejin/category/ai"),
+            FeedSource("机器之心", "https://www.jiqizhixin.com/rss"),
+            FeedSource("量子位", "https://www.qbitai.com/feed"),
+            FeedSource("InfoQ 中文", "https://www.infoq.cn/feed"),
+        ),
+        limit=10,
+    ),
 )
 
 
@@ -108,6 +128,20 @@ class FeedParseError(ValueError):
 
 
 _XML_DECL = re.compile(r"^\s*<\?xml[^>]*\?>")
+_BARE_AMP = re.compile(
+    r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)"
+)
+_CDATA = re.compile(r"(<!\[CDATA\[.*?\]\]>)", re.S)
+
+
+def _sanitize_entities(text: str) -> str:
+    """转义 CDATA 之外的裸 & / 未定义实体；CDATA 内容必须原样保留。"""
+    return "".join(
+        part if part.startswith("<![CDATA[") else _BARE_AMP.sub("&amp;", part)
+        for part in _CDATA.split(text)
+    )
+
+
 _DECL_ENC = re.compile(rb"""^\s*<\?xml[^>]*encoding=["']([A-Za-z0-9._-]+)["']""")
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -128,7 +162,9 @@ def decode_xml(raw: bytes) -> str:
         text = raw.decode(declared, errors="replace")
     except LookupError:
         text = raw.decode("utf-8", errors="replace")
-    return _XML_DECL.sub("", text, count=1)
+    text = _XML_DECL.sub("", text, count=1)
+    # 部分源（如机器之心）会输出裸 & 或 &nbsp; 这类 XML 未定义实体，先转义再解析
+    return _sanitize_entities(text)
 
 
 def parse_published(raw: str | None) -> datetime | None:
@@ -171,6 +207,151 @@ def clean_title(raw: str | None, *, source: str) -> str:
     return text
 
 
+class _TextExtractor(HTMLParser):
+    """把 HTML 压成保留段落边界的纯文本；脚本/样式直接跳过。"""
+
+    _BLOCK = {
+        "p", "br", "div", "li", "tr", "section", "article", "blockquote",
+        "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "table",
+    }
+    _SKIP = {"script", "style", "noscript", "svg", "iframe", "nav", "footer"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        lines: list[str] = []
+        for raw in "".join(self._parts).splitlines():
+            line = " ".join(raw.replace("\u3000", " ").split())
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+
+_ARTICLE_RE = re.compile(r"<article\b[^>]*>(.*?)</article>", re.S | re.I)
+_WECHAT_RE = re.compile(
+    r"""<div\b[^>]*\bid=["']js_content["'][^>]*>(.*?)</div>\s*</div>""", re.S | re.I
+)
+_MAIN_RE = re.compile(r"<main\b[^>]*>(.*?)</main>", re.S | re.I)
+
+
+_NAV_HINTS = (
+    "首页", "IT圈", "最会买", "日夜间", "随系统", "主题色", "无障碍",
+    "扫码登录", "扫码关注", "登录 注册", "客户端下载", "关注公众号",
+    "责任编辑", "免责声明", "版权所有", "相关阅读", "上一篇", "下一篇",
+    "即时 时政", "投稿", "订阅", "RSS", "软媒", "App客户端", "要知App",
+    "浅色", "深色", "收藏IT之家", "软媒魔方",
+)
+
+
+_NAV_TOKENS = frozenset(
+    {
+        "设置", "浅色", "深色", "黑色", "首页", "IT圈", "最会买", "登录",
+        "注册", "搜索", "投稿", "订阅", "RSS订阅", "收藏IT之家", "软媒应用",
+        "App客户端", "要知App", "软媒魔方", "业界", "手机", "电脑", "测评",
+        "视频", "AI", "苹果", "iPhone", "鸿蒙", "软件", "智车", "数码",
+        "学院", "游戏", "直播", "5G",
+    }
+)
+_DATE_RE = re.compile(
+    r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$"
+    r"|^\d{1,2}:\d{2}(?::\d{2})?$"
+)
+
+
+def _strip_boilerplate(text: str, *, title: str = "", source: str = "") -> str:
+    """去掉正文里混入的站点头部/导航/推荐位，避免模型把栏目名当新闻事实。"""
+    full_title = re.sub(r"[\s\W_]+", "", title.lower())
+    norm_title = full_title[:12]
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        norm = re.sub(r"[\s\W_]+", "", line.lower())
+        if line in _NAV_TOKENS or _DATE_RE.match(line):
+            continue
+        if full_title and norm.startswith(full_title) and len(norm) <= len(full_title) + 6:
+            continue
+        if norm_title and norm == norm_title:
+            continue
+        if line.startswith(("作者：", "责编：", "编辑：", "评论：")):
+            continue
+        if re.fullmatch(r"【[^】]{0,20}】", line):
+            continue
+        if ("公众号" in line or "发自" in line) and len(line) < 40:
+            continue
+        # 正文开头常见「标题 / 作者 / 时间 / 栏目条」页头，逐行剥掉
+        if not out:
+            if line.count("|") >= 2:
+                continue
+            if len(line) < 25 and not re.search(r"[。！？!?，,]", line):
+                continue
+        if "src=" in line or "< img" in line.lower() or "<img" in line.lower():
+            continue
+        hits = sum(1 for hint in _NAV_HINTS if hint in line)
+        if norm_title and norm.startswith(norm_title):
+            # 标题后面拖着作者/来源/导航（常见于 IT之家/量子位/中新网），整行丢弃
+            if hits or "来源：" in line or (source and source in line):
+                continue
+        # 多个栏目名拼成一行、且没有句子标点 → 导航条
+        if hits >= 2 and "。" not in line and "，" not in line:
+            continue
+        if hits and len(line) < 100:
+            continue
+        # 「标题 作者 时间 来源：xxx」这类页头
+        if "来源：" in line and len(line) < 120:
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def html_to_text(html: str, *, limit: int | None = None) -> str:
+    """HTML → 纯文本（纯函数）。优先取 article/main 正文，退化为整页。"""
+    if not html:
+        return ""
+    for pattern in (_ARTICLE_RE, _MAIN_RE, _WECHAT_RE):
+        match = pattern.search(html)
+        if match:
+            html = match.group(1)
+            break
+    extractor = _TextExtractor()
+    try:
+        extractor.feed(html)
+        extractor.close()
+    except Exception:  # noqa: BLE001 - 脏 HTML 不能让整轮抓取失败
+        return ""
+    text = extractor.text()
+    if limit is not None and len(text) > limit:
+        text = text[:limit].rstrip()
+    return text
+
+
+def _feed_detail(raw: str | None, *, limit: int = 600) -> str:
+    """RSS/Atom 描述 → 纯文本摘录。"""
+    if not raw or not raw.strip():
+        return ""
+    return html_to_text(raw, limit=limit)
+
+
 def _text(node: ET.Element | None) -> str:
     return (node.text or "").strip() if node is not None else ""
 
@@ -199,7 +380,14 @@ def _atom_link(entry: ET.Element) -> str:
     return fallback
 
 
-def _make_item(*, title: str, link: str, source: str, published_raw: str | None) -> NewsItem | None:
+def _make_item(
+    *,
+    title: str,
+    link: str,
+    source: str,
+    published_raw: str | None,
+    detail: str = "",
+) -> NewsItem | None:
     title = clean_title(title, source=source)
     if not title:
         return None
@@ -211,6 +399,7 @@ def _make_item(*, title: str, link: str, source: str, published_raw: str | None)
         link=link,
         source=source,
         published=parse_published(published_raw),
+        detail=detail,
     )
 
 
@@ -235,13 +424,16 @@ def parse_feed(raw: bytes, *, source: str) -> list[NewsItem]:
 
 
 def _parse_rss(root: ET.Element, source: str) -> list[NewsItem]:
+    content_ns = "{http://purl.org/rss/1.0/modules/content/}"
     out: list[NewsItem] = []
     for node in root.iter("item"):
+        detail_raw = _text(node.find("description")) or _text(node.find(f"{content_ns}encoded"))
         item = _make_item(
             title=_text(node.find("title")),
             link=_rss_link(node),
             source=source,
             published_raw=_text(node.find("pubDate")) or _text(node.find("date")),
+            detail=_feed_detail(detail_raw),
         )
         if item is not None:
             out.append(item)
@@ -253,11 +445,15 @@ def _parse_atom(root: ET.Element, source: str) -> list[NewsItem]:
     for entry in root.findall(f"{_ATOM_NS}entry"):
         title = _text(entry.find(f"{_ATOM_NS}title"))
         published = _text(entry.find(f"{_ATOM_NS}published")) or _text(entry.find(f"{_ATOM_NS}updated"))
+        detail_raw = _text(entry.find(f"{_ATOM_NS}summary")) or _text(
+            entry.find(f"{_ATOM_NS}content")
+        )
         item = _make_item(
             title=title,
             link=_atom_link(entry),
             source=source,
             published_raw=published,
+            detail=_feed_detail(detail_raw),
         )
         if item is not None:
             out.append(item)
@@ -320,6 +516,71 @@ class NewsFetcher:
         await self._client.aclose()
 
 
+class ArticleFetcher:
+    """按条目链接补抓正文；单篇失败保留 RSS 描述，绝不拖垮整轮。"""
+
+    def __init__(
+        self,
+        *,
+        timeout: float = 12.0,
+        max_bytes: int = 400_000,
+        concurrency: int = 5,
+        chars: int = 1200,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._max_bytes = max(1, max_bytes)
+        self._chars = max(200, chars)
+        self._sem = asyncio.Semaphore(max(1, concurrency))
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            transport=transport,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; my-im-agent/0.3; +https://github.com/18059842153/my-im-agent)"
+                )
+            },
+        )
+
+    async def enrich(self, items: Sequence[NewsItem]) -> list[NewsItem]:
+        outcomes = await asyncio.gather(
+            *(self._fetch_one(item) for item in items), return_exceptions=True
+        )
+        enriched: list[NewsItem] = []
+        for item, outcome in zip(items, outcomes, strict=False):
+            if isinstance(outcome, BaseException):
+                logger.debug("article fetch failed (%s): %s", item.link, outcome)
+                enriched.append(item)
+            else:
+                enriched.append(outcome)
+        return enriched
+
+    async def _fetch_one(self, item: NewsItem) -> NewsItem:
+        if not item.link:
+            return item
+        async with self._sem:
+            response = await self._client.get(item.link)
+        if response.status_code != 200:
+            return item
+        raw = response.content[: self._max_bytes]
+        encoding = response.encoding or "utf-8"
+        try:
+            page = raw.decode(encoding, errors="replace")
+        except LookupError:
+            page = raw.decode("utf-8", errors="replace")
+        text = _strip_boilerplate(
+            html_to_text(page), title=item.title, source=item.source
+        )
+        if len(text) > self._chars:
+            text = text[: self._chars].rstrip()
+        if len(text) < 80:
+            return item
+        return replace(item, detail=text)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
 # --------------------------------------------------------------------------- #
 # 选取层（纯函数）
 # --------------------------------------------------------------------------- #
@@ -336,22 +597,38 @@ def select_items(
     *,
     limit: int,
     seen: Collection[str] = (),
+    balance: bool = False,
 ) -> tuple[list[NewsItem], list[str]]:
-    """按时间倒序去重后取前 limit 条，返回 (条目, 对应 dedupe_key)。"""
+    """按时间倒序去重后取前 limit 条，返回 (条目, 对应 dedupe_key)。
+
+    balance=True 时按来源轮询取条，避免单个高产源（如 InfoQ）占满整个板块。
+    """
     ordered = sorted(items, key=lambda i: i.published or datetime.min, reverse=True)
-    picked: list[NewsItem] = []
-    keys: list[str] = []
+    deduped: list[tuple[NewsItem, str]] = []
     used: set[str] = set()
     for item in ordered:
         key = dedupe_key(item)
         if key in seen or key in used:
             continue
         used.add(key)
-        picked.append(item)
-        keys.append(key)
-        if len(picked) >= limit:
-            break
-    return picked, keys
+        deduped.append((item, key))
+
+    if not balance:
+        picked = deduped[:limit]
+    else:
+        buckets: dict[str, list[tuple[NewsItem, str]]] = {}
+        for pair in deduped:
+            buckets.setdefault(pair[0].source, []).append(pair)
+        picked = []
+        while len(picked) < limit:
+            progressed = False
+            for bucket in buckets.values():
+                if bucket and len(picked) < limit:
+                    picked.append(bucket.pop(0))
+                    progressed = True
+            if not progressed:
+                break
+    return [item for item, _ in picked], [key for _, key in picked]
 
 
 # --------------------------------------------------------------------------- #
@@ -367,10 +644,10 @@ class NewsSummary(BaseModel):
         description="沿用原标题；超过 24 个汉字才压缩，不得夸大",
     )
     # 注意：这里不能给默认值。给了默认值模型会把它当可选项、直接留空。
-    summary: str = Field(
+    points: list[str] = Field(
         min_length=1,
-        max_length=200,
-        description="一句话事实摘要，≤40 汉字，单行",
+        max_length=3,
+        description="2~3 条事实要点，每条 ≤45 汉字，必须保留关键实体、数字、结论或影响",
     )
 
 
@@ -384,14 +661,32 @@ class NewsSummarizer(Protocol):
     ) -> list[NewsSummary]: ...
 
 
-def _make_summary(item_id: str, title: str, summary: str) -> NewsSummary:
-    """内部构造：绕过 min_length 校验（空摘要是合法的降级态，但对模型是必填）。"""
-    return NewsSummary.model_construct(id=item_id, title=title, summary=summary)
+def _make_summary(item_id: str, title: str, points: Sequence[str]) -> NewsSummary:
+    """内部构造：绕过 min_length 校验（空要点是合法的降级态，但对模型是必填）。"""
+    return NewsSummary.model_construct(id=item_id, title=title, points=list(points))
+
+
+def _points_from_detail(detail: str, *, limit: int = 2) -> list[str]:
+    """模型不可用时，从正文/RSS 描述里截前几句当要点。"""
+    text = " ".join(detail.split())
+    if not text:
+        return []
+    out: list[str] = []
+    for part in re.split(r"[。！？!?；;]\s*", text):
+        part = part.strip("，,、 ")
+        if len(part) < 8:
+            continue
+        out.append(_clip(part, 70))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def fallback_summaries(items: Sequence[NewsItem]) -> list[NewsSummary]:
-    """降级：保留原题、摘要留空，渲染时就只剩标题。"""
-    return [_make_summary(i.id, i.title, "") for i in items]
+    """降级：用正文/RSS 描述截句；连描述都没有就只留标题。"""
+    return [
+        _make_summary(i.id, i.title, _points_from_detail(i.detail)) for i in items
+    ]
 
 
 class AgentlyNewsSummarizer:
@@ -443,18 +738,28 @@ class AgentlyNewsSummarizer:
                     "today": f"{now:%Y-%m-%d}",
                     "section": section_label,
                     "items": [
-                        {"id": i.id, "title": i.title, "source": i.source} for i in chunk
+                        {
+                            "id": i.id,
+                            "title": i.title,
+                            "source": i.source,
+                            "detail": i.detail[:800],
+                        }
+                        for i in chunk
                     ],
                 }
             )
             .instruct(
                 {
-                    "role": "你是中文新闻编辑，为每日早报写一句话摘要。",
+                    "role": "你是中文新闻编辑，把每条新闻压缩成 30 秒能扫完的事实要点。",
                     "rules": [
                         "每条都必须输出，id 必须原样回传 input.items[].id，不得编造新 id。",
                         "title 沿用原标题；超过 24 个汉字才压缩，禁止夸大、禁止加感叹号。",
-                        "summary 是一句话事实摘要，不超过 40 个汉字，单行，不加 emoji、不加编号。",
-                        "只依据 title 与 source 写，不要补充你记忆里的旧闻。",
+                        "points 输出 2~3 条，按重要性排序；每条一句话，不超过 45 个汉字。",
+                        "每条要点必须带关键信息：主体、动作/数字、结论或影响，禁止「值得关注」这类空话。",
+                        "只依据 title、source、detail 写，禁止补充记忆里的旧闻或推测细节。",
+                        "detail 为空时，只写标题里明确的信息，宁可少写也不要编造。",
+                        "detail 可能混入站点导航、栏目名、推荐语，必须忽略这些噪声，只保留新闻事实。",
+                        "不要复述标题，不加 emoji、编号、项目符号。",
                         "输出顺序与 input.items 一致。",
                     ],
                 }
@@ -466,7 +771,7 @@ class AgentlyNewsSummarizer:
 
 
 class EchoNewsSummarizer:
-    """未配置模型 Key 时的兜底：不联网，全部只留标题。"""
+    """未配置模型 Key 时的兜底：不联网，只从 RSS 描述截要点。"""
 
     async def summarize(
         self, *, section_label: str, items: Sequence[NewsItem], now: datetime
@@ -489,33 +794,37 @@ def reconcile(
     for item in items:
         summary = by_id.get(item.id)
         if summary is None:
-            pairs.append((item, _make_summary(item.id, item.title, "")))
+            pairs.append(
+                (item, _make_summary(item.id, item.title, _points_from_detail(item.detail)))
+            )
             continue
+        points = _tidy_points(summary.points, detail=item.detail)
         pairs.append(
             (
                 item,
-                _make_summary(
-                    summary.id,
-                    summary.title or item.title,
-                    _tidy_summary(item.title, summary.summary),
-                ),
+                _make_summary(summary.id, summary.title or item.title, points),
             )
         )
     return pairs
 
 
-def _tidy_summary(title: str, summary: str) -> str:
-    """摘要与标题重复就没必要占字节（模型经常把标题复述一遍）。"""
-    folded = " ".join(summary.split())
-    if not folded:
-        return ""
-    key_summary = re.sub(r"[\s\W_]+", "", folded.lower())
-    key_title = re.sub(r"[\s\W_]+", "", title.lower())
-    if not key_summary:
-        return ""
-    if key_summary in key_title or key_title in key_summary:
-        return ""
-    return folded
+def _tidy_points(points: Sequence[str], *, detail: str = "", limit: int = 3) -> list[str]:
+    """归一化要点：单行、去项目符号、去重、限长；全空时退回正文截句。"""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in points:
+        text = " ".join(str(raw).split()).lstrip("·-•*　 ").strip()
+        if not text:
+            continue
+        text = _clip(text, 70)
+        key = re.sub(r"[\s\W_]+", "", text.lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned or _points_from_detail(detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -555,9 +864,10 @@ def render_section(
             lines.append(f"{index}. **[{title}]({safe_url(item.link)})**")
         else:
             lines.append(f"{index}. **{title}**")
-        text = _clip(md_safe(summary.summary), 60)
-        if text:
-            lines.append(f"   {text}")
+        for point in summary.points[:2]:  # 推送只放前 2 条，完整要点在归档里
+            text = _clip(md_safe(point), 70)
+            if text:
+                lines.append(f"   · {text}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -774,6 +1084,7 @@ class DigestResult:
     status: str
     messages: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    archive_url: str = ""
 
 
 def parse_at(raw: str) -> time:
@@ -794,6 +1105,8 @@ class NewsDigestService:
         summarizer: NewsSummarizer,
         notify: NotifyFn,
         sections: Sequence[Section] = SECTIONS,
+        article_fetcher: ArticleFetcher | None = None,
+        archive: NewsArchive | None = None,
     ) -> None:
         self._settings = settings
         self._state = state
@@ -801,6 +1114,12 @@ class NewsDigestService:
         self._summarizer = summarizer
         self._notify = notify
         self._sections = tuple(sections)
+        self._article_fetcher = article_fetcher
+        self._archive = archive or NewsArchive(
+            settings.news_archive_path,
+            public_base_url=settings.news_public_base_url,
+            token=settings.news_token,
+        )
         self._at = parse_at(settings.news_at)
         self._catchup = timedelta(minutes=settings.news_catchup_minutes)
 
@@ -827,9 +1146,10 @@ class NewsDigestService:
         messages: list[str] = []
         keys: list[str] = []
         errors: list[str] = []
+        digests: list[tuple[Section, list[tuple[NewsItem, NewsSummary]]]] = []
         try:
             async with asyncio.timeout(self._settings.news_total_timeout):
-                messages, keys, errors = await self._build(now, state, late=late)
+                messages, keys, errors, digests = await self._build(now, state, late=late)
         except TimeoutError:
             errors.append("整轮超时")
             logger.error("news build timed out after %ss", self._settings.news_total_timeout)
@@ -841,6 +1161,20 @@ class NewsDigestService:
             if persist:
                 self._state.mark_done(now, keys, status="failed", error="; ".join(errors) or "无内容")
             return DigestResult(ok=False, status="failed", errors=errors)
+
+        archive_url = ""
+        if digests:
+            try:
+                archived = self._archive.save(now=now, digests=digests)
+                archive_url = archived.url
+                if archive_url:
+                    messages[-1] = (
+                        messages[-1].rstrip()
+                        + f"\n\n📥 完整版（全部条目）：{archive_url}"
+                    )
+            except OSError as exc:  # 归档失败不影响已构建的推送
+                errors.append(f"归档失败：{exc}")
+                logger.warning("news archive failed: %s", exc)
 
         sent = 0
         target = self._settings.news_target_user
@@ -855,11 +1189,19 @@ class NewsDigestService:
         status = "ok" if sent == len(messages) else ("partial" if sent else "failed")
         if persist:
             self._state.mark_done(now, keys, status=status, error="; ".join(errors) or None)
-        return DigestResult(ok=sent > 0, status=status, messages=messages, errors=errors)
+        return DigestResult(
+            ok=sent > 0,
+            status=status,
+            messages=messages,
+            errors=errors,
+            archive_url=archive_url,
+        )
 
     async def _build(
         self, now: datetime, state: NewsState, *, late: bool
-    ) -> tuple[list[str], list[str], list[str]]:
+    ) -> tuple[
+        list[str], list[str], list[str], list[tuple[Section, list[tuple[NewsItem, NewsSummary]]]]
+    ]:
         seen = set(state.seen)
         results = await asyncio.gather(
             *(self._build_section(section, now, seen, late=late) for section in self._sections),
@@ -869,30 +1211,41 @@ class NewsDigestService:
         messages: list[str] = []
         keys: list[str] = []
         errors: list[str] = []
+        digests: list[tuple[Section, list[tuple[NewsItem, NewsSummary]]]] = []
         for section, outcome in zip(self._sections, results, strict=False):
             if isinstance(outcome, BaseException):
                 errors.append(f"{section.label}: {outcome}")
                 logger.warning("section %s failed: %s", section.label, outcome)
                 continue
-            section_messages, section_keys, section_errors = outcome
+            section_messages, section_keys, section_errors, pairs = outcome
             messages.extend(section_messages)
             keys.extend(section_keys)
             errors.extend(section_errors)
-        return messages, keys, errors
+            if pairs:
+                digests.append((section, pairs))
+        return messages, keys, errors, digests
 
     async def _build_section(
         self, section: Section, now: datetime, seen: set[str], *, late: bool
-    ) -> tuple[list[str], list[str], list[str]]:
+    ) -> tuple[
+        list[str], list[str], list[str], list[tuple[NewsItem, NewsSummary]]
+    ]:
         fetched = await self._fetcher.fetch(section)
         errors = list(fetched.errors)
         if not fetched.items:
-            return [], [], errors + [f"{section.label}: 没有抓到任何条目"]
+            return [], [], errors + [f"{section.label}: 没有抓到任何条目"], []
 
         picked, keys = select_items(
-            fetched.items, limit=self._settings.news_top_n, seen=seen
+            fetched.items,
+            limit=section.limit or self._settings.news_top_n,
+            seen=seen,
+            balance=section.key == "ai",
         )
         if not picked:
-            return [], [], errors + [f"{section.label}: 全是已推送过的"]
+            return [], [], errors + [f"{section.label}: 全是已推送过的"], []
+
+        if self._article_fetcher is not None:
+            picked = await self._article_fetcher.enrich(picked)
 
         summaries = await self._summarizer.summarize(
             section_label=section.label, items=picked, now=now
@@ -904,10 +1257,10 @@ class NewsDigestService:
         if header_note:
             rendered = rendered.replace("\n\n", f"\n{header_note}\n\n", 1)
         if not summaries:
-            rendered += "\n（AI 摘要暂不可用，仅列标题）"
+            rendered += "\n（AI 要点暂不可用，仅列正文摘录）"
 
         chunks = split_markdown(rendered, limit=max(500, self._settings.news_max_bytes))
-        return chunks, keys, errors
+        return chunks, keys, errors, pairs
 
 
 # --------------------------------------------------------------------------- #

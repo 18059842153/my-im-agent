@@ -281,30 +281,32 @@ class TestReconcile:
     def test_reorders_by_input_and_fills_missing(self):
         items = [make_item("甲"), make_item("乙"), make_item("丙")]
         summaries = [
-            NewsSummary(id=items[2].id, title="丙", summary="丙的摘要"),
-            NewsSummary(id=items[0].id, title="甲", summary="甲的摘要"),
+            NewsSummary(id=items[2].id, title="丙", points=["丙的摘要"]),
+            NewsSummary(id=items[0].id, title="甲", points=["甲的摘要"]),
         ]
         pairs = reconcile(items, summaries)
 
         assert [pair[0].title for pair in pairs] == ["甲", "乙", "丙"]
-        assert pairs[1][1].summary == ""
+        assert pairs[1][1].points == []
         assert pairs[1][1].title == "乙"
 
     def test_unknown_and_duplicate_ids(self):
         items = [make_item("甲")]
         summaries = [
-            NewsSummary(id="鬼影", title="伪造", summary="不该出现"),
-            NewsSummary(id=items[0].id, title="甲", summary="第一次"),
-            NewsSummary(id=items[0].id, title="甲", summary="第二次"),
+            NewsSummary(id="鬼影", title="伪造", points=["不该出现"]),
+            NewsSummary(id=items[0].id, title="甲", points=["第一次"]),
+            NewsSummary(id=items[0].id, title="甲", points=["第二次"]),
         ]
         pairs = reconcile(items, summaries)
         assert len(pairs) == 1
-        assert pairs[0][1].summary == "第一次"
+        assert pairs[0][1].points == ["第一次"]
 
     def test_summary_newlines_collapsed(self):
         items = [make_item("甲")]
-        pairs = reconcile(items, [NewsSummary(id=items[0].id, title="甲", summary="第一行\n第二行")])
-        assert pairs[0][1].summary == "第一行 第二行"
+        pairs = reconcile(
+            items, [NewsSummary(id=items[0].id, title="甲", points=["第一行\n第二行"])]
+        )
+        assert pairs[0][1].points == ["第一行 第二行"]
 
 
 class FakeSummarizer:
@@ -322,7 +324,7 @@ class FakeSummarizer:
             if index in self.fail_chunks:
                 out.extend(fallback_summaries(chunk))
                 continue
-            out.extend(NewsSummary(id=i.id, title=i.title, summary=self.model) for i in chunk)
+            out.extend(NewsSummary(id=i.id, title=i.title, points=[self.model]) for i in chunk)
         return out
 
 
@@ -331,10 +333,11 @@ class TestSummarizer:
     async def test_echo_returns_titles_only(self):
         items = [make_item("甲"), make_item("乙")]
         summaries = await EchoNewsSummarizer().summarize(section_label="科技", items=items, now=NOW)
-        assert [s.summary for s in summaries] == ["", ""]
+        assert [s.points for s in summaries] == [[], []]
 
     @pytest.mark.asyncio
     async def test_chunking_splits_requests(self):
+        pytest.importorskip("agently")
         settings = make_settings(Path("."), llm_api_key="k")
         summarizer = AgentlyNewsSummarizer(settings, chunk_size=8)
         # 只验证分块逻辑，不真的请求模型：直接打桩内部方法
@@ -342,7 +345,7 @@ class TestSummarizer:
 
         async def fake_chunk(section_label, chunk, now):
             seen.append(len(chunk))
-            return [NewsSummary(id=i.id, title=i.title, summary="s") for i in chunk]
+            return [NewsSummary(id=i.id, title=i.title, points=["s"]) for i in chunk]
 
         summarizer._summarize_chunk = fake_chunk  # type: ignore[method-assign]
         items = [make_item(f"t{i}") for i in range(20)]
@@ -463,7 +466,7 @@ class FakeFetcher:
         self.results = results
 
     async def fetch(self, section: Section) -> SectionResult:
-        return self.results[section.key]
+        return self.results.get(section.key, SectionResult(section=section))
 
     async def aclose(self) -> None:
         return None

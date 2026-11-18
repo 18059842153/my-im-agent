@@ -312,36 +312,47 @@ daily/weekly/workdays:
 
 ## 13. 每日新闻推送（v0.3.0）
 
-**目标**：每天 09:30 主动推送一份早报，科技 15 条 + 综合 15 条，每条一句 AI 摘要。
+**目标**：每天 09:30 主动推送一份早报，科技 15 条 + 综合 15 条 + AI 前沿 10 条；每条 2~3 个事实要点（主体、数字、影响），30 秒可扫完。
 
 ### 13.1 所有权
 
 | 决策 / 动作 | Owner | 位置 |
 | --- | --- | --- |
 | 抓取与解析 RSS（含 gb2312 / CST 时区纠正） | Host | `news.decode_xml` / `parse_feed` |
-| 跨源去重、按时间选前 15 条、跨天 `seen` 去重 | Host | `news.select_items` |
-| 压成一句话摘要 | **Model** | `news.AgentlyNewsSummarizer` |
+| 抓取文章正文（并发、超时、字节上限，失败退回 RSS 描述） | Host | `news.ArticleFetcher` |
+| 跨源去重、按时间选条、AI 板块按来源均衡 | Host | `news.select_items` |
+| 压成 2~3 个事实要点 | **Model** | `news.AgentlyNewsSummarizer` |
 | 摘要 id 回显校验、缺失补位、去重排序 | Host | `news.reconcile` |
 | 渲染与按字节切分（3800B） | Host | `news.render_section` / `split_markdown` |
+| 当天归档 md/html、生成下载链接 | Host | `news_archive.NewsArchive` |
+| 下载服务与口令校验 | Host | `news_server.create_app` |
 | 何时推、是否已推、失败重试上限 | Host | `news.should_fire` / `NewsStateStore` |
 
 ### 13.2 数据契约
 
-`NewsItem(id, title, link, source, published)`；AI 输出 `NewsDigest{items: NewsSummary{id, title, summary}}`
-（`summary` 对模型必填，`min_length=1` —— 给默认值模型会直接留空）。
+`NewsItem(id, title, link, source, published, detail)`；AI 输出 `NewsDigest{items: NewsSummary{id, title, points}}`
+（`points` 为 2~3 条字符串，每条约 45 字，必须含事实信息）。
 状态文件 `data/news_state.json`：`last_date/last_status/attempts/seen`。
 
 ### 13.3 时序
 
 ```
-09:30 tick → should_fire? → 落盘 sending → 并发抓 3 个源 → 各区选 15 条
-         → 每 5 条一 chunk 调模型（2~6 次）→ reconcile → 渲染
-         → 依次发送（科技 1 条、综合 1 条）→ 落盘 ok/partial/failed
+09:30 tick → should_fire? → 落盘 sending → 并发抓 4 个源
+         → 各区选条（科技/综合 15，AI 10 且按来源均衡）
+         → 并发抓正文 → 每 5 条一 chunk 调模型 → reconcile → 渲染
+         → 写归档 md/html → 依次发送 → 末尾附下载链接 → 落盘 ok/partial/failed
 ```
 
 补发窗口 90 分钟（09:30–11:00 内启动会补发并标注）；超出窗口记 `skipped`，
 需要时 `--news-now` 人工触发。
 
-### 13.4 已知限制
+### 13.4 归档与下载
+
+每次成功构建都会写入 `data/news/YYYY-MM-DD.md` 与 `.html`，并更新 `latest.*`。
+配置 `IM_AGENT_NEWS_PUBLIC_BASE_URL=http://<公网IP>:<端口>` 后，最后一条消息会附
+`{前缀}/news/YYYY-MM-DD.html`；设置 `IM_AGENT_NEWS_TOKEN` 时追加 `?token=`。
+内置服务只暴露 `news/` 下符合日期命名的 md/html 文件，目录列表与路径穿越均被拒绝。
+
+### 13.5 已知限制
 
 见 §11 L9（摘要失败降级为标题版）、L10（at-most-once 不重复推送）。
